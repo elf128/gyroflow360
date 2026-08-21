@@ -395,32 +395,35 @@ DATA_TYPEF sample_input_at(float2 uv, float4 jac, __global const uchar *srcptr, 
 
 float2 rotate_and_distort(float2 pos, uint idx, __global KernelParams *params, __global const float *matrices, __global const float *mesh_data) {
     __global const float *matrix = &matrices[idx];
-    float _x = (pos.x * matrix[0]) + (pos.y * matrix[1]) + matrix[2] + params->translation3d.x;
-    float _y = (pos.x * matrix[3]) + (pos.y * matrix[4]) + matrix[5] + params->translation3d.y;
-    float _w = (pos.x * matrix[6]) + (pos.y * matrix[7]) + matrix[8] + params->translation3d.z;
-    if (_w > 0.0f) {
-        if (params->r_limit > 0.0f && length((float2)(_x, _y) / _w) > params->r_limit) {
+    // 4×4 matrix × [pos.x, pos.y, 0, 1]: skip col 2 (d=0), use col 3 (W=1)
+    float _x = (pos.x * matrix[0]) + (pos.y * matrix[1]) + matrix[3] + params->translation3d.x;
+    float _y = (pos.x * matrix[4]) + (pos.y * matrix[5]) + matrix[7] + params->translation3d.y;
+    float _z = (pos.x * matrix[8]) + (pos.y * matrix[9]) + matrix[11] + params->translation3d.z;
+    if (_z > 0.0f) {
+        if (params->r_limit > 0.0f && atan2(length((float2)(_x, _y)), _z) > atan(params->r_limit)) {
             return (float2)(-99999.0f, -99999.0f);
         }
 
         if ((params->flags & 2048) && params->light_refraction_coefficient != 1.0f && params->light_refraction_coefficient > 0.0f) {
-            float r = length((float2)(_x, _y)) / _w;
-            float sin_theta_d = (r / sqrt(1.0f + r * r)) * params->light_refraction_coefficient;
-            float r_d = sin_theta_d / sqrt(1.0f - sin_theta_d * sin_theta_d);
-            if (r_d != 0.0f) {
-                _w *= r / r_d;
+            float r_xy      = length((float2)(_x, _y));
+            float sin_theta   = sin(atan2(r_xy, _z));
+            float sin_theta_d = sin_theta * params->light_refraction_coefficient;
+            if (sin_theta < 1.0f && sin_theta_d < 1.0f) {
+                float r   = sin_theta   / sqrt(1.0f - sin_theta   * sin_theta);
+                float r_d = sin_theta_d / sqrt(1.0f - sin_theta_d * sin_theta_d);
+                if (r_d != 0.0f) { _z *= r / r_d; }
             }
         }
 
-        float2 uv = params->f * distort_point(_x, _y, _w, params);
+        float2 uv = params->f * distort_point(_x, _y, _z, params);
 
-        if ((params->flags & 256) && (matrix[9] != 0.0f || matrix[10] != 0.0f || matrix[11] != 0.0f || matrix[12] != 0.0f || matrix[13] != 0.0f)) {
-            float ang_rad = matrix[11];
+        if ((params->flags & 256) && (matrix[16] != 0.0f || matrix[17] != 0.0f || matrix[18] != 0.0f || matrix[19] != 0.0f || matrix[20] != 0.0f)) {
+            float ang_rad = matrix[18];
             float cos_a = cos(-ang_rad);
             float sin_a = sin(-ang_rad);
             uv = (float2)(
-                cos_a * uv.x - sin_a * uv.y - matrix[9]  + matrix[12],
-                sin_a * uv.x + cos_a * uv.y - matrix[10] + matrix[13]
+                cos_a * uv.x - sin_a * uv.y - matrix[16] + matrix[19],
+                sin_a * uv.x + cos_a * uv.y - matrix[17] + matrix[20]
             );
         }
 
@@ -530,7 +533,7 @@ float2 undistort_coord(float2 out_pos, __global KernelParams *params, __global c
         sy = min((int)params->height, max(0, (int)round(out_pos.y)));
     }
     if (params->matrix_count > 1) {
-        int idx = (params->matrix_count / 2) * 14; // Use middle matrix
+        int idx = (params->matrix_count / 2) * 21; // Use middle matrix
         float2 uv = rotate_and_distort(out_pos, idx, params, matrices, mesh_data);
         if (uv.x > -99998.0f) {
             if ((params->flags & 16)) { // Horizontal RS
@@ -542,7 +545,7 @@ float2 undistort_coord(float2 out_pos, __global KernelParams *params, __global c
     }
     ///////////////////////////////////////////////////////////////////
 
-    int idx = min(sy, params->matrix_count - 1) * 14;
+    int idx = min(sy, params->matrix_count - 1) * 21;
     float2 uv = rotate_and_distort(out_pos, idx, params, matrices, mesh_data);
 
     float2 frame_size = (float2)((float)params->width, (float)params->height);

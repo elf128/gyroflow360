@@ -45,11 +45,9 @@ fn undistort_point(pos: vec2<f32>) -> vec2<f32> {
 }
 
 fn distort_point(x: f32, y: f32, z: f32) -> vec2<f32> {
-    let pos = vec2<f32>(x, y) / z;
-    if (params.k1.x == 0.0 && params.k1.y == 0.0 && params.k1.z == 0.0 && params.k1.w == 0.0) { return pos; }
-    let r = length(pos);
+    let r = length(vec2<f32>(x, y));
+    let theta = atan2(r, z);
 
-    let theta = atan(r);
     let theta2 = theta*theta;
     let theta4 = theta2*theta2;
     let theta6 = theta4*theta2;
@@ -61,5 +59,5 @@ fn distort_point(x: f32, y: f32, z: f32) -> vec2<f32> {
     if (r != 0.0) {
         scale = theta_d / r;
     }
-    return pos * scale;
+    return vec2<f32>(x, y) * scale;
 }

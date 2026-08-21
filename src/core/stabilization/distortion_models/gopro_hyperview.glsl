@@ -10,15 +10,12 @@ vec2 hyperview(vec2 uv) {
     );
 }
 
+// uv in [-1, 1] centered at zero; hyperview works in [-0.5, 0.5]
 vec2 digital_undistort_point(vec2 uv) {
-    vec2 out_c2 = vec2(params.output_width, params.output_height);
-    uv = (uv / out_c2) - 0.5;
-
+    uv = uv * 0.5;
     uv = hyperview(uv);
-
     uv.x = uv.x / 1.555555555;
-    uv = (uv + 0.5) * out_c2;
-    return uv;
+    return uv * 2.0;
 }
 vec2 digital_distort_point(vec2 uv) {
     vec2 size = vec2(params.width, params.height);

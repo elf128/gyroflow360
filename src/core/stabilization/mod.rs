@@ -95,6 +95,7 @@ bitflags::bitflags! {
         const HAS_MESH_DATA        = 1 << 9; // 512
         const HAS_FPD_DATA         = 1 << 10; // 1024
         const ANY_UNDERWATER       = 1 << 11; // 2048
+        const HAS_DUAL_LENS        = 1 << 12; // 4096
     }
 }
 
@@ -145,6 +146,20 @@ pub struct KernelParams {
     pub reserved2:                f32, // 16
     pub ewa_coeffs_p:             [f32; 4], // 16
     pub ewa_coeffs_q:             [f32; 4], // 16
+
+    // ── Dual lens (Phase 1) ───────────────────────────────────────────────
+    // Must be kept in sync with wgpu_undistort.wgsl KernelParams struct
+    pub f2:                       [f32; 2], // 8  - focal length for lens 2
+    pub c2:                       [f32; 2], // 16 - lens center for lens 2
+    pub k2:                       [f32; 12], // 16,16,16 - distortion coefficients for lens 2
+    pub distortion_model2:        stabilize_spirv::DistortionModel, // 4
+    pub lens1_axis:               [f32; 3], // 16 - optical axis of lens 1 in world space (typically [0,0,1])
+    pub lens2_axis:               [f32; 3], // 12 - optical axis of lens 2 in world space (typically [0,0,-1])
+    pub seam_blend_radians:       f32,      // 16 - angular half-width of the blend zone
+    pub lens2_rotation:           [f32; 9], // 16,16,4 - rotation matrix: IMU frame → lens 2 optical frame
+    pub reserved3:                f32,      // 8
+    pub reserved4:                f32,      // 12
+    pub reserved5:                f32,      // 16
 }
 unsafe impl bytemuck::Zeroable for KernelParams {}
 unsafe impl bytemuck::Pod for KernelParams {}
@@ -231,6 +246,7 @@ impl Stabilization {
         kernel_flags.set(KernelParamsFlags::HAS_OUTPUT_RECT, buffers.output.rect.is_some() || self.output_size.0 != buffers.output.size.0 || self.output_size.1 != buffers.output.size.1);
         kernel_flags.set(KernelParamsFlags::FRAMEBUFFER_INVERTED, self.compute_params.framebuffer_inverted);
         kernel_flags.set(KernelParamsFlags::ANY_UNDERWATER, (self.compute_params.light_refraction_coefficient != 1.0 && self.compute_params.light_refraction_coefficient > 0.0) || self.compute_params.keyframes.is_keyframed(&crate::KeyframeType::LightRefractionCoeff));
+        kernel_flags.set(KernelParamsFlags::HAS_DUAL_LENS, self.compute_params.lens2.is_some());
 
         {
             let gyro = self.compute_params.gyro.read();
@@ -721,6 +737,23 @@ impl Stabilization {
             return Err(GyroflowCoreError::NoStabilizationData(timestamp_us));
         }
         Err(GyroflowCoreError::Unknown)
+    }
+
+    /// Upload raw pixel data for the secondary (lens 2) input texture/buffer.
+    /// Call this before `process_pixels` on every frame when `HAS_DUAL_LENS` is active.
+    pub fn upload_input2_data(&self, data: &[u8], width: u32, height: u32, bytes_per_row: u32) {
+        if self.share_wgpu_instances {
+            // In the shared (rendering) path the active wgpu is in the thread-local LRU cache.
+            // Upload to every cached instance; each plane-processor has its own entry.
+            CACHED_WGPU.with(|x| {
+                let cached = x.0.borrow();
+                for (_, wgpu) in cached.iter() {
+                    wgpu.upload_input2(data, width, height, bytes_per_row);
+                }
+            });
+        } else if let Some(ref wgpu) = self.wgpu {
+            wgpu.upload_input2(data, width, height, bytes_per_row);
+        }
     }
 }
 

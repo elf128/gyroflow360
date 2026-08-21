@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright © 2021-2022 Adrian <adrian.eddy at gmail>
 
-use nalgebra::Matrix3;
+use nalgebra::{ Matrix3, Matrix4, Rotation3, Vector3 };
 use super::{ ComputeParams, KernelParams };
 use rayon::iter::{ ParallelIterator, IntoParallelIterator };
 use crate::gyro_source::FileMetadata;
@@ -10,12 +10,40 @@ use crate::util::{ MapClosest, map_coord };
 
 #[derive(Default, Clone)]
 pub struct FrameTransform {
-    pub matrices: Vec<[f32; 14]>,
+    pub matrices: Vec<[f32; 21]>,
     pub kernel_params: super::KernelParams,
     pub fov: f64,
     pub minimal_fov: f64,
     pub focal_length: Option<f64>,
     pub mesh_data: Vec<f32>,
+}
+
+/// Build R_viewport⁻¹ (= R_viewport.transpose()) from a Look At direction vector.
+///
+/// Convention (Gyroflow/OpenCV camera space): X = right, Y = down, Z = forward.
+/// `look_at` = the world direction the centre of the output should face.
+/// Default (0, 0, 1) = straight forward, which is a no-op (returns identity).
+fn viewport_rotation_inv(look_at: [f64; 3]) -> Matrix3<f64> {
+    let forward = match Vector3::new(look_at[0], look_at[1], look_at[2]).try_normalize(1e-9) {
+        Some(v) => v,
+        None    => return Matrix3::identity(),
+    };
+    // World up = -Y (anti-gravity; Y is down in this convention).
+    // If look_at is nearly parallel to world-up, fall back to +Z to avoid degenerate cross.
+    let world_up = if (forward.y.abs() - 1.0).abs() < 1e-6 {
+        Vector3::new(0.0, 0.0, 1.0)
+    } else {
+        Vector3::new(0.0, -1.0, 0.0)
+    };
+    let right = forward.cross(&world_up).normalize(); // X column
+    let down  = forward.cross(&right);                // Y column  (= Z × X in standard basis)
+    // Columns of R_viewport = [right, down, forward].
+    // R_viewport⁻¹ = R_viewport.transpose() → rows become [right, down, forward].
+    Matrix3::new(
+        right.x, right.y, right.z,
+        down.x,  down.y,  down.z,
+        forward.x, forward.y, forward.z,
+    )
 }
 
 impl FrameTransform {
@@ -256,8 +284,13 @@ impl FrameTransform {
                      * quat1
                      * gyro.org_quat_at_timestamp(quat_time);
 
+            let viewport_inv = viewport_rotation_inv([
+                params.keyframes.value_at_gyro_timestamp(&KeyframeType::ViewportLookAtX, quat_time).unwrap_or(0.0),
+                params.keyframes.value_at_gyro_timestamp(&KeyframeType::ViewportLookAtY, quat_time).unwrap_or(0.0),
+                params.keyframes.value_at_gyro_timestamp(&KeyframeType::ViewportLookAtZ, quat_time).unwrap_or(1.0),
+            ]);
 
-            let mut r = image_rotation * *quat.to_rotation_matrix().matrix();
+            let mut r = image_rotation * viewport_inv * *quat.to_rotation_matrix().matrix();
             if params.framebuffer_inverted {
                 r[(0, 2)] *= -1.0; r[(1, 2)] *= -1.0;
                 r[(2, 0)] *= -1.0; r[(2, 1)] *= -1.0;
@@ -293,19 +326,34 @@ impl FrameTransform {
                 }
             }
 
-            let i_r = (new_k * r).pseudo_inverse(0.000001);
-            if let Err(err) = i_r {
-                log::error!("Failed to multiply matrices: {:?} * {:?}: {}", new_k, r, err);
-            }
-            let i_r: Matrix3<f32> = nalgebra::convert(i_r.unwrap_or_default());
+            // K_out as 4×4: focal lengths in cols 0/1, principal point in W col (col 3), Z passthrough in col 2.
+            let k4 = Matrix4::<f32>::new(
+                new_k[(0, 0)] as f32, 0.0,                  0.0, new_k[(0, 2)] as f32,
+                0.0,                  new_k[(1, 1)] as f32,  0.0, new_k[(1, 2)] as f32,
+                0.0,                  0.0,                   0.0, 1.0,
+                0.0,                  0.0,                   1.0, 0.0,
+            );
+            let r4 = Matrix4::<f32>::new(
+                r[(0, 0)] as f32, r[(0, 1)] as f32, r[(0, 2)] as f32, 0.0,
+                r[(1, 0)] as f32, r[(1, 1)] as f32, r[(1, 2)] as f32, 0.0,
+                r[(2, 0)] as f32, r[(2, 1)] as f32, r[(2, 2)] as f32, 0.0,
+                0.0,              0.0,              0.0,               1.0,
+            );
+            let m = match (k4 * r4).try_inverse() {
+                Some(inv) => inv,
+                None => {
+                    log::error!("Failed to invert 4x4 matrix: k4={:?}, r4={:?}", k4, r4);
+                    Matrix4::identity()
+                }
+            };
             [
-                i_r[(0, 0)], i_r[(0, 1)], i_r[(0, 2)],
-                i_r[(1, 0)], i_r[(1, 1)], i_r[(1, 2)],
-                i_r[(2, 0)], i_r[(2, 1)], i_r[(2, 2)],
-                sx, sy, ra,
-                ox, oy
+                m[(0, 0)], m[(0, 1)], m[(0, 2)], m[(0, 3)],
+                m[(1, 0)], m[(1, 1)], m[(1, 2)], m[(1, 3)],
+                m[(2, 0)], m[(2, 1)], m[(2, 2)], m[(2, 3)],
+                m[(3, 0)], m[(3, 1)], m[(3, 2)], m[(3, 3)],
+                sx, sy, ra, ox, oy
             ]
-        }).collect::<Vec<[f32; 14]>>();
+        }).collect::<Vec<[f32; 21]>>();
         drop(file_metadata);
         drop(gyro);
 
@@ -318,6 +366,46 @@ impl FrameTransform {
         if params.framebuffer_inverted {
             adaptive_zoom_center_y *= -1.0;
         }
+
+        // ── Dual lens ────────────────────────────────────────────────────
+        let (dual_f2, dual_c2, dual_k2, dual_lens1_axis, dual_lens2_axis, dual_lens2_rotation) =
+        if let Some(ref l2) = params.lens2 {
+            let cam2 = l2.get_camera_matrix((params.width, params.height), false);
+            let dist2 = l2.get_distortion_coeffs();
+
+            // Base rotation: lens 2 faces backward (180° around Y).
+            let base: Matrix3<f64> = Matrix3::new(-1.0, 0.0, 0.0,  0.0, 1.0, 0.0,  0.0, 0.0, -1.0);
+            // User-supplied offset angles in degrees [pitch, yaw, roll].
+            let [pitch, yaw, roll] = params.lens2_rotation_offset;
+            let offset = Rotation3::from_euler_angles(
+                roll.to_radians(), pitch.to_radians(), yaw.to_radians()
+            );
+            let lens2_rot: Matrix3<f64> = *offset.matrix() * base;
+
+            // Optical axis of lens 2 in world space = R^T * [0,0,1] = third row of R (world→lens).
+            let axis1 = [0.0f32, 0.0, 1.0]; // lens 1 points "forward"
+            let axis2 = [lens2_rot[(2,0)] as f32, lens2_rot[(2,1)] as f32, lens2_rot[(2,2)] as f32];
+
+            // WGSL struct uses row-major layout (rot_ij = row i, col j).
+            // nalgebra's as_slice() is column-major, so extract explicitly row-major.
+            let lens2_rotation: [f32; 9] = [
+                lens2_rot[(0,0)] as f32, lens2_rot[(0,1)] as f32, lens2_rot[(0,2)] as f32,
+                lens2_rot[(1,0)] as f32, lens2_rot[(1,1)] as f32, lens2_rot[(1,2)] as f32,
+                lens2_rot[(2,0)] as f32, lens2_rot[(2,1)] as f32, lens2_rot[(2,2)] as f32,
+            ];
+
+            (
+                [cam2[(0,0)] as f32, cam2[(1,1)] as f32],
+                [cam2[(0,2)] as f32, cam2[(1,2)] as f32],
+                dist2.iter().map(|x| *x as f32).collect::<Vec<f32>>().try_into().unwrap(),
+                axis1,
+                axis2,
+                lens2_rotation,
+            )
+        } else {
+            ([0.0f32; 2], [0.0f32; 2], [0.0f32; 12], [0.0f32; 3], [0.0f32; 3], [0.0f32; 9])
+        };
+        // ── Dual lens ────────────────────────────────────────────────────
 
         let kernel_params = KernelParams {
             matrix_count:  matrices.len() as i32,
@@ -336,6 +424,12 @@ impl FrameTransform {
             translation3d: [0.0, 0.0, 0.0, 0.0], // currently unused
             digital_lens_params,
             light_refraction_coefficient: light_refraction_coefficient as f32,
+            f2: dual_f2,
+            c2: dual_c2,
+            k2: dual_k2,
+            lens1_axis: dual_lens1_axis,
+            lens2_axis: dual_lens2_axis,
+            lens2_rotation: dual_lens2_rotation,
             ..Default::default()
         };
 

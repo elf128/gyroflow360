@@ -73,7 +73,7 @@ impl LensProfileDatabase {
 
         let _time = std::time::Instant::now();
 
-        let mut load = |data: DataSource, f_name: &str| {
+        let mut load = |data: DataSource, f_name: &str, from_json_file: bool| {
             if f_name.ends_with(".gyroflow") {
                 let mut profile = LensProfile::default();
                 profile.name = std::path::Path::new(f_name).file_stem().map(|x| x.to_string_lossy().to_string()).unwrap_or_default();
@@ -99,16 +99,13 @@ impl LensProfileDatabase {
                         } else {
                             f_name.to_string()
                         };
-                        if self.map.contains_key(&key) {
-                            if !self.loaded {
-                                log::warn!("Lens profile already present: {}, path_to_file: {} from {}", key, f_name, self.map.get(&key).unwrap().path_to_file);
-
-                                // let prof = std::fs::read(&f_name).unwrap();
-                                // let mut prof: serde_json::Value = serde_json::from_slice(&prof).unwrap();
-                                // *prof.get_mut("identifier").unwrap() = serde_json::Value::String(String::new());
-                                // std::fs::write(f_name, serde_json::to_string_pretty(&prof).unwrap()).unwrap();
+                        // On-disk JSON files override CBOR bundle entries (allows shipping
+                        // per-camera fixes without regenerating the whole bundle).
+                        let should_insert = !self.map.contains_key(&key) || from_json_file;
+                        if should_insert {
+                            if self.map.contains_key(&key) {
+                                log::info!("JSON file overrides existing profile: {}, from {}", key, f_name);
                             }
-                        } else {
                             (|| -> Option<()> {
                                 let to_checksum = format!("{}|{}{}|{:.8}{:.8}|{:.8}{:.8}|{:.8}{:.8}{:.8}{:.8}",
                                     profile.identifier,
@@ -131,6 +128,8 @@ impl LensProfileDatabase {
                                 Some(())
                             })();
                             self.map.insert(key, profile);
+                        } else if !self.loaded {
+                            log::warn!("Lens profile already present: {}, path_to_file: {} from {}", key, f_name, self.map.get(&key).unwrap().path_to_file);
                         }
                     }
                 },
@@ -148,7 +147,7 @@ impl LensProfileDatabase {
                     let f_name = entry.path().to_string_lossy().replace('\\', "/");
                     if f_name.ends_with(".json") || f_name.ends_with(".gyroflow") {
                         if let Ok(data) = std::fs::read_to_string(&f_name) {
-                            load(DataSource::String(data), &f_name);
+                            load(DataSource::String(data), &f_name, true);
                         }
                     }
                     if !bundle_loaded && f_name.ends_with(".cbor.gz") {
@@ -161,7 +160,7 @@ impl LensProfileDatabase {
                                     for (f_name, profile) in array {
                                         if f_name == "__version" { self.version = profile.as_u64().unwrap_or(0) as u32; continue; }
                                         if f_name.starts_with("__") { continue; }
-                                        load(DataSource::SerdeValue(profile), &f_name);
+                                        load(DataSource::SerdeValue(profile), &f_name, false);
                                     }
                                 }
                             }
@@ -186,7 +185,7 @@ impl LensProfileDatabase {
                     for (f_name, profile) in array {
                         if f_name == "__version" { self.version = profile.as_u64().unwrap_or(0) as u32; continue; }
                         if f_name.starts_with("__") { continue; }
-                        load(DataSource::SerdeValue(profile), &f_name);
+                        load(DataSource::SerdeValue(profile), &f_name, false);
                     }
                 }
             }

@@ -46,11 +46,9 @@ float2 undistort_point(float2 pos, __global KernelParams *params) {
 }
 
 float2 distort_point(float x, float y, float z, __global KernelParams *params) {
-    float2 pos = (float2)(x, y) / z;
-    if (params->k[0] == 0.0 && params->k[1] == 0.0 && params->k[2] == 0.0 && params->k[3] == 0.0) return pos;
-    float r = length(pos);
+    float r = length((float2)(x, y));
+    float theta = atan2(r, z);
 
-    float theta = atan(r);
     float theta2 = theta*theta,
           theta4 = theta2*theta2,
           theta6 = theta4*theta2,
@@ -60,5 +58,5 @@ float2 distort_point(float x, float y, float z, __global KernelParams *params) {
 
     float scale = r == 0.0f? 1.0f : theta_d / r;
 
-    return pos * scale;
+    return (float2)(x, y) * scale;
 }

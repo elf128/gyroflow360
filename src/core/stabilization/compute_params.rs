@@ -61,6 +61,11 @@ pub struct ComputeParams {
     pub digital_lens: Option<DistortionModel>,
     pub digital_lens_params: Option<Vec<f64>>,
 
+    // Dual lens
+    pub lens2: Option<LensProfile>,
+    pub lens2_distortion_model: Option<DistortionModel>,
+    pub lens2_rotation_offset: [f64; 3], // degrees [pitch, yaw, roll]
+
     // Focal length smoothing
     pub focal_lengths: Vec<Option<f64>>,
     pub smoothed_focal_lengths: Vec<Option<f64>>,
@@ -75,8 +80,13 @@ impl ComputeParams {
 
         let distortion_model = DistortionModel::from_name(lens.distortion_model.as_deref().unwrap_or("opencv_fisheye"));
         let digital_lens = lens.digital_lens.as_ref().map(|x| DistortionModel::from_name(&x));
-
         let digital_lens_params = lens.digital_lens_params.clone();
+
+        let lens2 = lens.dual_lens.lens2_profile.as_ref().map(|p| *p.clone());
+        let lens2_distortion_model = lens2.as_ref().map(|p| {
+            DistortionModel::from_name(p.distortion_model.as_deref().unwrap_or("opencv_fisheye"))
+        });
+        let lens2_rotation_offset = lens.dual_lens.lens2_rotation_offset;
 
         Self {
             gyro: mgr.gyro.clone(),
@@ -123,6 +133,10 @@ impl ComputeParams {
             distortion_model,
             digital_lens,
             digital_lens_params,
+
+            lens2,
+            lens2_distortion_model,
+            lens2_rotation_offset,
             suppress_rotation: false,
             fov_algorithm_margin: 2.0,
 

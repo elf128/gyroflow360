@@ -88,7 +88,7 @@ pub const COEFFS: [f32; 64+128+256 + 9*4 + 4] = [
 // const ALPHAS: [f32; 4] = [ 1.0, 0.75, 0.50, 0.25 ];
 
 impl Stabilization {
-    pub fn undistort_image_cpu_spirv<T: PixelType>(buffers: &mut Buffers, params: &KernelParams, distortion_model: &DistortionModel, digital_lens: Option<&DistortionModel>, matrices: &[[f32; 14]], drawing: &[u8]) -> bool {
+    pub fn undistort_image_cpu_spirv<T: PixelType>(buffers: &mut Buffers, params: &KernelParams, _distortion_model: &DistortionModel, _digital_lens: Option<&DistortionModel>, matrices: &[[f32; 21]], drawing: &[u8]) -> bool {
         if let BufferSource::Cpu { buffer: input } = &mut buffers.input.data {
             if let BufferSource::Cpu { buffer: output } = &mut buffers.output.data {
                 if buffers.output.size.2 <= 0 {
@@ -98,8 +98,8 @@ impl Stabilization {
 
                 output.par_chunks_mut(buffers.output.size.2).enumerate().for_each(|(y, row_bytes)| { // Parallel iterator over buffer rows
                     row_bytes.chunks_mut(params.bytes_per_pixel as usize).enumerate().for_each(|(x, pix_chunk)| { // iterator over row pixels
-                        let matrices2: &[f32] = unsafe { std::slice::from_raw_parts(matrices.as_ptr() as *const f32, matrices.len() * 14 ) };
-                        let params2: stabilize_spirv::KernelParams  = unsafe { std::mem::transmute(*params) };
+                        let matrices2: &[f32] = unsafe { std::slice::from_raw_parts(matrices.as_ptr() as *const f32, matrices.len() * 21 ) };
+                        let params2: stabilize_spirv::KernelParams  = unsafe { std::ptr::read(params as *const _ as *const stabilize_spirv::KernelParams) };
                         let drawing2: &[u32]  = unsafe { std::slice::from_raw_parts(drawing.as_ptr() as *const u32, drawing.len() / 4 ) };
 
                         let color = stabilize_spirv::undistort(
@@ -130,37 +130,38 @@ impl Stabilization {
         }
     }
 
-    pub fn rotate_and_distort(pos: (f32, f32), idx: usize, params: &KernelParams, matrices: &[[f32; 14]], distortion_model: &DistortionModel, digital_lens: Option<&DistortionModel>, r_limit_sq: f32, mesh_data: &[f64]) -> Option<(f32, f32)> {
+    pub fn rotate_and_distort(pos: (f32, f32), idx: usize, params: &KernelParams, matrices: &[[f32; 21]], distortion_model: &DistortionModel, digital_lens: Option<&DistortionModel>, r_limit_sq: f32, mesh_data: &[f64]) -> Option<(f32, f32)> {
         let matrices = matrices[idx];
-        let _x = (pos.0 * matrices[0]) + (pos.1 * matrices[1]) + matrices[2] + params.translation3d[0];
-        let _y = (pos.0 * matrices[3]) + (pos.1 * matrices[4]) + matrices[5] + params.translation3d[1];
-        let mut _w = (pos.0 * matrices[6]) + (pos.1 * matrices[7]) + matrices[8] + params.translation3d[2];
-        if _w > 0.0 {
-            if r_limit_sq > 0.0 && (_x.powi(2) + _y.powi(2)) > r_limit_sq * _w {
+        // 4×4 matrix × [pos.x, pos.y, 0, 1]: skip col 2 (d=0), use col 3 (W=1)
+        let _x = (pos.0 * matrices[0]) + (pos.1 * matrices[1]) + matrices[3] + params.translation3d[0];
+        let _y = (pos.0 * matrices[4]) + (pos.1 * matrices[5]) + matrices[7] + params.translation3d[1];
+        let mut _z = (pos.0 * matrices[8]) + (pos.1 * matrices[9]) + matrices[11] + params.translation3d[2];
+        if _z > 0.0 {
+            if r_limit_sq > 0.0 && (_x.powi(2) + _y.powi(2)).sqrt().atan2(_z) > r_limit_sq.sqrt().atan() {
                 return None;
             }
 
             if params.light_refraction_coefficient != 1.0 && params.light_refraction_coefficient > 0.0 {
-                if _w != 0.0 {
-                    let r = (_x.powi(2) + _y.powi(2)).sqrt() / _w;
-                    let sin_theta_d = (r / (1.0 + r * r).sqrt()) * params.light_refraction_coefficient;
+                let r_xy = (_x.powi(2) + _y.powi(2)).sqrt();
+                let sin_theta   = r_xy.atan2(_z).sin();
+                let sin_theta_d = sin_theta * params.light_refraction_coefficient;
+                if sin_theta < 1.0 && sin_theta_d < 1.0 {
+                    let r   = sin_theta   / (1.0 - sin_theta   * sin_theta).sqrt();
                     let r_d = sin_theta_d / (1.0 - sin_theta_d * sin_theta_d).sqrt();
-                    if r_d != 0.0 {
-                        _w *= r / r_d;
-                    }
+                    if r_d != 0.0 { _z *= r / r_d; }
                 }
             }
 
-            let mut uv = distortion_model.distort_point(_x, _y, _w, &params);
+            let mut uv = distortion_model.distort_point(_x, _y, _z, &params);
             uv = (uv.0 * params.f[0], uv.1 * params.f[1]);
 
-            if matrices[9] != 0.0 || matrices[10] != 0.0 || matrices[11] != 0.0 || matrices[12] != 0.0 || matrices[13] != 0.0 {
-                let ang_rad = matrices[11];
+            if matrices[16] != 0.0 || matrices[17] != 0.0 || matrices[18] != 0.0 || matrices[19] != 0.0 || matrices[20] != 0.0 {
+                let ang_rad = matrices[18];
                 let cos_a = (-ang_rad).cos();
                 let sin_a = (-ang_rad).sin();
                 uv = (
-                    cos_a * uv.0 - sin_a * uv.1 - matrices[9]  + matrices[12],
-                    sin_a * uv.0 + cos_a * uv.1 - matrices[10] + matrices[13]
+                    cos_a * uv.0 - sin_a * uv.1 - matrices[16] + matrices[19],
+                    sin_a * uv.0 + cos_a * uv.1 - matrices[17] + matrices[20]
                 );
             }
 
@@ -230,7 +231,7 @@ impl Stabilization {
     // Adapted from OpenCV: initUndistortRectifyMap + remap
     // https://github.com/opencv/opencv/blob/2b60166e5c65f1caccac11964ad760d847c536e4/modules/calib3d/src/fisheye.cpp#L465-L567
     // https://github.com/opencv/opencv/blob/2b60166e5c65f1caccac11964ad760d847c536e4/modules/imgproc/src/opencl/remap.cl#L390-L498
-    pub fn undistort_image_cpu<const I: i32, T: PixelType>(buffers: &mut Buffers, params: &KernelParams, distortion_model: &DistortionModel, digital_lens: Option<&DistortionModel>, matrices: &[[f32; 14]], drawing: &[u8], mesh_data: &[f32]) -> bool {
+    pub fn undistort_image_cpu<const I: i32, T: PixelType>(buffers: &mut Buffers, params: &KernelParams, distortion_model: &DistortionModel, digital_lens: Option<&DistortionModel>, matrices: &[[f32; 21]], drawing: &[u8], mesh_data: &[f32]) -> bool {
         // #[cold]
         // fn draw_pixel(pix: &mut Vector4<f32>, x: i32, y: i32, is_input: bool, width: i32, params: &KernelParams, drawing: &[u8]) {
         //     if drawing.is_empty() || (params.flags & 8) == 0 { return; }
@@ -418,7 +419,7 @@ impl Stabilization {
             )
         }
 
-        fn undistort_coord(mut out_pos: Vector2<f32>, params: &KernelParams, matrices: &[[f32; 14]], distortion_model: &DistortionModel, digital_lens: Option<&DistortionModel>, r_limit_sq: f32, mesh_data: &[f64], out_c: &Vector2<f32>, out_f: &Vector2<f32>) -> Option<Vector2<f32>> {
+        fn undistort_coord(mut out_pos: Vector2<f32>, params: &KernelParams, matrices: &[[f32; 21]], distortion_model: &DistortionModel, digital_lens: Option<&DistortionModel>, r_limit_sq: f32, mesh_data: &[f64], out_c: &Vector2<f32>, out_f: &Vector2<f32>) -> Option<Vector2<f32>> {
             out_pos.x = map_coord(out_pos.x, params.output_rect[0] as f32, (params.output_rect[0] + params.output_rect[2]) as f32, 0.0, params.output_width  as f32);
             out_pos.y = map_coord(out_pos.y, params.output_rect[1] as f32, (params.output_rect[1] + params.output_rect[3]) as f32, 0.0, params.output_height as f32);
             out_pos.x += params.translation2d[0];

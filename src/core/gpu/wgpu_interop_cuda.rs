@@ -236,7 +236,7 @@ pub fn allocate_shared_cuda_memory(size: usize) -> Result<CudaSharedMemory, Box<
     let mut shared_handle = 0isize;
 
     let mut cu_mem_handle: CUmemGenericAllocationHandle = 0;
-    let mut prop = CUmemAllocationProp {
+    let prop = CUmemAllocationProp {
         type_: CU_MEM_ALLOCATION_TYPE_PINNED,
         requestedHandleTypes: share_type,
         location,

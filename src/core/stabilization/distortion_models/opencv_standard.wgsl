@@ -25,6 +25,7 @@ fn undistort_point(pos_param: vec2<f32>) -> vec2<f32> {
 }
 
 fn distort_point(x: f32, y: f32, z: f32) -> vec2<f32> {
+    if (z <= 0.0) { return vec2<f32>(-99999.0, -99999.0); }
     let pos = vec2<f32>(x, y) / z;
     let r2 = pos.x * pos.x + pos.y * pos.y;
     let r4 = r2 * r2;

@@ -42,6 +42,63 @@ Item {
     property var mergedFiles: [];
 
     property Menu.VideoInformation vidInfo: null;
+    property bool is360Camera: window.lensProfile && window.lensProfile.isDualLens;
+
+    // Rotate the virtual 360° viewport by dragging. Called from the DragHandler inside vidParent.
+    // dx/dy are pixel deltas; positive dx = drag right (look right), positive dy = drag down (look up,
+    // matching YouTube-style 360 viewer convention). Coordinate space: X=right, Y=down, Z=forward.
+    function rotateViewport360(dx_px, dy_px) {
+        const SENSITIVITY = 0.25; // degrees per pixel
+        const ts = vid.timestamp;
+
+        // Read current look-at; default to straight-forward (0, 0, 1)
+        const raw_x = controller.keyframe_value_at_video_timestamp("ViewportLookAtX", ts);
+        const raw_y = controller.keyframe_value_at_video_timestamp("ViewportLookAtY", ts);
+        const raw_z = controller.keyframe_value_at_video_timestamp("ViewportLookAtZ", ts);
+        let lx = (raw_x !== undefined && raw_x !== null) ? +raw_x : 0.0;
+        let ly = (raw_y !== undefined && raw_y !== null) ? +raw_y : 0.0;
+        let lz = (raw_z !== undefined && raw_z !== null) ? +raw_z : 1.0;
+
+        // Normalise (defensive)
+        let len = Math.sqrt(lx*lx + ly*ly + lz*lz);
+        if (len < 1e-9) { lx=0; ly=0; lz=1; len=1; }
+        lx /= len; ly /= len; lz /= len;
+
+        // Yaw: rotate around world-Y (down) axis. Ry(θ): X'=cos·X+sin·Z, Z'=−sin·X+cos·Z
+        const yaw = dx_px * SENSITIVITY * Math.PI / 180;
+        const cy = Math.cos(yaw), sy = Math.sin(yaw);
+        let rx = cy*lx + sy*lz;
+        let ry = ly;
+        let rz = -sy*lx + cy*lz;
+
+        // Right axis = forward × world_up where world_up=(0,−1,0)  →  (rz, 0, −rx), normalised
+        const rl = Math.sqrt(rx*rx + rz*rz);
+        const kx = rl > 1e-9 ? rz/rl : 1.0; // ky = 0
+        const kz = rl > 1e-9 ? -rx/rl : 0.0;
+
+        // Pitch: Rodrigues rotation of (rx,ry,rz) around k=(kx,0,kz) by pitch angle
+        const pitch = dy_px * SENSITIVITY * Math.PI / 180;
+        const cp = Math.cos(pitch), sp = Math.sin(pitch);
+        const dot = kx*rx + kz*rz;
+        // cross = k × v
+        const crx = -kz*ry;
+        const cry = kz*rx - kx*rz;
+        const crz = kx*ry;
+
+        let fx = rx*cp + crx*sp + kx*dot*(1-cp);
+        let fy = ry*cp + cry*sp;               // ky=0 → no dot term
+        let fz = rz*cp + crz*sp + kz*dot*(1-cp);
+
+        // Normalise result
+        const fl = Math.sqrt(fx*fx + fy*fy + fz*fz);
+        if (fl > 1e-9) { fx/=fl; fy/=fl; fz/=fl; }
+
+        // Store as a single keyframe at t=0 (constant for entire clip)
+        controller.set_keyframe("ViewportLookAtX", 0, fx);
+        controller.set_keyframe("ViewportLookAtY", 0, fy);
+        controller.set_keyframe("ViewportLookAtZ", 0, fz);
+        vid.forceRedraw();
+    }
 
     function loadGyroflowData(obj: var, queueJobId: var): void {
         root.pendingGyroflowData = null;
@@ -788,6 +845,34 @@ Item {
                 TapHandler {
                     onTapped: timeline.focus = true;
                     onDoubleTapped: root.fullScreen = root.fullScreen? 0 : 1;
+                }
+                // 360° viewport drag — only active when a dual-lens / 360° profile is loaded
+                DragHandler {
+                    id: viewportDragHandler;
+                    target: null; // prevents the handler from physically moving vidParent
+                    enabled: root.is360Camera && vid.loaded;
+                    cursorShape: active ? Qt.ClosedHandCursor : Qt.OpenHandCursor;
+
+                    property real prevX: 0;
+                    property real prevY: 0;
+
+                    onActiveChanged: {
+                        if (active) {
+                            prevX = centroid.position.x;
+                            prevY = centroid.position.y;
+                        }
+                    }
+                    onCentroidChanged: {
+                        if (active) {
+                            const dx = centroid.position.x - prevX;
+                            const dy = centroid.position.y - prevY;
+                            prevX = centroid.position.x;
+                            prevY = centroid.position.y;
+                            if (Math.abs(dx) > 0.01 || Math.abs(dy) > 0.01) {
+                                root.rotateViewport360(dx, dy);
+                            }
+                        }
+                    }
                 }
                 GridGuide {
                     id: gridGuide;

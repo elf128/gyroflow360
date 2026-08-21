@@ -53,6 +53,10 @@ define_keyframes! {
     SmoothingParamYaw,           "#88c451", "Yaw smoothness",                   |v| format!("{:.2}", v),
 
     VideoSpeed,                  "#f6e926", "Video speed",                      |v| format!("{:.1}%", v * 100.0),
+
+    ViewportLookAtX,             "#29d4c8", "Viewport look-at X (right +)",     |v| format!("{:.3}", v),
+    ViewportLookAtY,             "#22bfb4", "Viewport look-at Y (down +)",      |v| format!("{:.3}", v),
+    ViewportLookAtZ,             "#1aa99e", "Viewport look-at Z (forward +)",   |v| format!("{:.3}", v),
 }
 
 #[derive(Default, Debug, Copy, Clone, PartialEq, PartialOrd, Eq, Ord, ::serde::Serialize, ::serde::Deserialize)]

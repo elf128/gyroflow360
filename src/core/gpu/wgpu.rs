@@ -35,6 +35,10 @@ pub struct WgpuWrapper  {
     in_texture: TextureHolder,
     out_texture: TextureHolder,
 
+    in2_texture: Option<wgpu::Texture>,
+    in2_buffer: Option<wgpu::Buffer>,
+    in2_size: u64,
+
     pipeline: PipelineType,
     bind_group: Option<wgpu::BindGroup>,
 
@@ -58,6 +62,8 @@ impl Drop for WgpuWrapper {
         self.buf_drawing = None;
         self.in_texture = TextureHolder::default();
         self.out_texture = TextureHolder::default();
+        self.in2_texture = None;
+        self.in2_buffer = None;
         self.pipeline = PipelineType::None;
         self.bind_group = None;
 
@@ -278,6 +284,29 @@ impl WgpuWrapper {
             let out_texture = init_texture(&device, backend, &buffers.output, wgpu_format.0, false);
 
             let uses_textures = in_texture.wgpu_texture.is_some();
+
+            let (in2_texture, in2_buffer) = if uses_textures {
+                let tex = device.create_texture(&wgpu::TextureDescriptor {
+                    label: None,
+                    size: wgpu::Extent3d { width: buffers.input.size.0 as u32, height: buffers.input.size.1 as u32, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu_format.0,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                (Some(tex), None)
+            } else {
+                let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                    size: in_size,
+                    usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                    label: None,
+                    mapped_at_creation: false,
+                });
+                (None, Some(buf))
+            };
+
             if uses_textures {
                 while let Some(pos) = kernel.find("{buffer_input}") {
                     kernel.replace_range(pos..kernel.find("{/buffer_input}").unwrap() + 15, "");
@@ -320,6 +349,7 @@ impl WgpuWrapper {
                         wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: wgpu::BufferSize::new(4096) }, count: None },
                         wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: wgpu::BufferSize::new(drawing_len as _) }, count: None },
                         wgpu::BindGroupLayoutEntry { binding: 5, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { sample_type, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None },
+                        wgpu::BindGroupLayoutEntry { binding: 6, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { sample_type, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None },
                     ],
                     label: None,
                 })
@@ -333,6 +363,7 @@ impl WgpuWrapper {
                         wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: wgpu::BufferSize::new(drawing_len as _) }, count: None },
                         wgpu::BindGroupLayoutEntry { binding: 5, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: wgpu::BufferSize::new(in_size as _) }, count: None },
                         wgpu::BindGroupLayoutEntry { binding: 6, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: wgpu::BufferSize::new(out_size as _) }, count: None },
+                        wgpu::BindGroupLayoutEntry { binding: 7, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: wgpu::BufferSize::new(in_size as _) }, count: None },
                     ],
                     label: None,
                 })
@@ -397,6 +428,8 @@ impl WgpuWrapper {
             let bind_group = match &pipeline {
                 PipelineType::None => None,
                 PipelineType::Render(p) => {
+                    let view1 = in_texture.wgpu_texture.as_ref().unwrap().create_view(&wgpu::TextureViewDescriptor::default());
+                    let view2 = in2_texture.as_ref().unwrap().create_view(&wgpu::TextureViewDescriptor::default());
                     Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: None,
                         layout: &p.get_bind_group_layout(0),
@@ -406,7 +439,8 @@ impl WgpuWrapper {
                             wgpu::BindGroupEntry { binding: 2, resource: buf_coeffs.as_entire_binding() },
                             wgpu::BindGroupEntry { binding: 3, resource: buf_mesh_data.as_entire_binding() },
                             wgpu::BindGroupEntry { binding: 4, resource: buf_drawing.as_entire_binding() },
-                            wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&in_texture.wgpu_texture.as_ref().unwrap().create_view(&wgpu::TextureViewDescriptor::default())) },
+                            wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&view1) },
+                            wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&view2) },
                         ],
                     }))
                 },
@@ -422,6 +456,7 @@ impl WgpuWrapper {
                             wgpu::BindGroupEntry { binding: 4, resource: buf_drawing.as_entire_binding() },
                             wgpu::BindGroupEntry { binding: 5, resource: in_texture.wgpu_buffer.as_ref().unwrap().as_entire_binding() },
                             wgpu::BindGroupEntry { binding: 6, resource: out_texture.wgpu_buffer.as_ref().unwrap().as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 7, resource: in2_buffer.as_ref().unwrap().as_entire_binding() },
                         ],
                     }))
                 }
@@ -433,6 +468,9 @@ impl WgpuWrapper {
                 staging_buffer: Some(staging_buffer),
                 out_texture,
                 in_texture,
+                in2_texture,
+                in2_buffer,
+                in2_size: in_size,
                 buf_matrices: Some(buf_matrices),
                 buf_params: Some(buf_params),
                 buf_drawing: Some(buf_drawing),
@@ -448,6 +486,27 @@ impl WgpuWrapper {
             })
         } else {
             Err(WgpuError::NoAvailableAdapter)
+        }
+    }
+
+    pub fn upload_input2(&self, data: &[u8], width: u32, height: u32, bytes_per_row: u32) -> bool {
+        if let Some(tex) = &self.in2_texture {
+            self.queue.write_texture(
+                tex.as_image_copy(),
+                data,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(bytes_per_row), rows_per_image: None },
+                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            );
+            true
+        } else if let Some(buf) = &self.in2_buffer {
+            if data.len() as u64 > self.in2_size {
+                log::error!("upload_input2: data {} > in2 buffer {}", data.len(), self.in2_size);
+                return false;
+            }
+            self.queue.write_buffer(buf, 0, data);
+            true
+        } else {
+            false
         }
     }
 

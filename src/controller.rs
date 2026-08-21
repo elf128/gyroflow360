@@ -45,6 +45,7 @@ struct CalibrationItem {
 }
 
 #[derive(Default, QObject)]
+#[allow(dead_code)]
 pub struct Controller {
     base: qt_base_class!(trait QObject),
 
@@ -308,6 +309,11 @@ pub struct Controller {
     ongoing_computations: BTreeSet<u64>,
 
     pub stabilizer: Arc<StabilizationManager>,
+
+    // Dual-lens: path + lazily-opened decoder shared with the preview closure
+    dual_lens_file_changed: qt_signal!(path: QString),
+    open_dual_lens_file: qt_method!(fn(&mut self, url: QString)),
+    secondary_source_state: Arc<std::sync::Mutex<(String, Option<crate::rendering::secondary_source::SecondaryVideoSource>)>>,
 }
 
 impl Controller {
@@ -689,6 +695,24 @@ impl Controller {
     fn video_file_loaded(&mut self, player: QJSValue) {
         let stab = self.stabilizer.clone();
 
+        // Try auto-detecting the secondary file if a dual-lens profile is already loaded
+        {
+            let needs_secondary = stab.lens.read().dual_lens.lens2_profile.is_some();
+            if needs_secondary {
+                let primary_url = stab.input_file.read().url.clone();
+                if !primary_url.is_empty() {
+                    if let Some(sec_path) = crate::rendering::secondary_source::SecondaryVideoSource::pair_path(&primary_url) {
+                        let mut state = self.secondary_source_state.lock().unwrap();
+                        if state.0 != sec_path {
+                            state.0 = sec_path.clone();
+                            state.1 = None;
+                            self.dual_lens_file_changed(QString::from(sec_path));
+                        }
+                    }
+                }
+            }
+        }
+
         if let Some(vid) = player.to_qobject::<MDKVideoItem>() {
             let vid = unsafe { &mut *vid.as_ptr() }; // vid.borrow_mut()
             let duration_ms = vid.duration;
@@ -866,6 +890,33 @@ impl Controller {
         self.lens_changed();
         self.lens_profile_loaded(QString::from(json), QString::from(filepath), QString::from(checksum));
         self.request_recompute();
+
+        // Auto-detect secondary file for dual-lens profiles
+        let needs_secondary = self.stabilizer.lens.read().dual_lens.lens2_profile.is_some();
+        if needs_secondary {
+            let primary_url = self.stabilizer.input_file.read().url.clone();
+            if !primary_url.is_empty() {
+                if let Some(sec_path) = crate::rendering::secondary_source::SecondaryVideoSource::pair_path(&primary_url) {
+                    {
+                        let mut state = self.secondary_source_state.lock().unwrap();
+                        state.0 = sec_path.clone();
+                        state.1 = None;
+                    }
+                    self.dual_lens_file_changed(QString::from(sec_path));
+                }
+            }
+        }
+    }
+
+    fn open_dual_lens_file(&mut self, url: QString) {
+        let path = url.to_string();
+        let path = path.strip_prefix("file://").unwrap_or(&path).to_owned();
+        {
+            let mut state = self.secondary_source_state.lock().unwrap();
+            state.0 = path.clone();
+            state.1 = None; // force re-open on next preview frame
+        }
+        self.dual_lens_file_changed(QString::from(path));
     }
     fn load_default_preset(&mut self) {
         // Assumes regular filesystem
@@ -1138,6 +1189,7 @@ impl Controller {
 
             let stab = self.stabilizer.clone();
             let update_info2 = update_info.clone();
+            let secondary_state = self.secondary_source_state.clone();
             vid.onProcessPixels(Box::new(move |frame, timestamp_ms, width, height, stride, pixels: &mut [u8]| -> (u32, u32, u32, *mut u8) {
                 let _time = std::time::Instant::now();
 
@@ -1147,6 +1199,23 @@ impl Controller {
                 let (ow, oh) = params.output_size;
                 let os = ow * 4; // Assume RGBA8 - 4 bytes per pixel
                 drop(params);
+
+                // Upload secondary frame for dual-lens blend
+                {
+                    let mut state = secondary_state.lock().unwrap();
+                    if !state.0.is_empty() {
+                        if state.1.is_none() {
+                            state.1 = crate::rendering::secondary_source::SecondaryVideoSource::open(&state.0).ok();
+                        }
+                        if let Some(ref mut src) = state.1 {
+                            let ts_us = (timestamp_ms * 1000.0).round() as i64;
+                            src.seek_to_us(ts_us);
+                            if let Some(rgba) = src.next_frame_as_rgba8(width as u32, height as u32) {
+                                stab.upload_input2_data(&rgba, width as u32, height as u32, (width * 4) as u32);
+                            }
+                        }
+                    }
+                }
 
                 let mut out_pixels = out_pixels.borrow_mut();
                 out_pixels.resize_with(os*oh, u8::default);
@@ -2433,10 +2502,10 @@ impl Controller {
         }
         #[cfg(not(any(target_os = "windows", target_os = "macos")))] { false }
     }
-    fn nle_plugins(&self, command: QString, typ: QString) -> QString {
+    fn nle_plugins(&self, _command: QString, _typ: QString) -> QString {
         #[cfg(any(target_os = "windows", target_os = "macos"))] {
-            let typ = typ.to_string();
-            let command = command.to_string();
+            let typ = _typ.to_string();
+            let command = _command.to_string();
             let result = match command.as_ref() {
                 "install" | "latest_version" => {
                     let command2 = QString::from(command.clone());

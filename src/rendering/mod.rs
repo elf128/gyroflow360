@@ -11,6 +11,7 @@ pub mod render_queue;
 pub mod mdk_processor;
 pub mod video_processor;
 pub mod zero_copy;
+pub mod secondary_source;
 use gyroflow_core::settings;
 use zero_copy::*;
 #[cfg(target_os = "android")]

@@ -39,6 +39,7 @@ pub struct LensProfile {
     pub frame_readout_time: Option<f64>,
     pub frame_readout_direction: Option<ReadoutDirection>,
     pub gyro_lpf: Option<f64>,
+    pub imu_orientation: Option<String>,
 
     pub input_horizontal_stretch: f64,
     pub input_vertical_stretch: f64,
@@ -73,6 +74,9 @@ pub struct LensProfile {
     pub crop_factor: Option<f64>,
     pub global_shutter: bool,
 
+    #[serde(default)]
+    pub dual_lens: DualLensConfig,
+
     // Skip these fields, make sure to update in `get_json_value`
     pub path_to_file: String,
     pub optimal_fov: Option<f64>,
@@ -80,6 +84,27 @@ pub struct LensProfile {
     pub rating: Option<f64>,
     pub checksum: Option<String>,
     parsed_interpolations: BTreeMap<i64, LensProfile>,
+}
+
+#[derive(Deserialize, Serialize, Default, Clone, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum DualLensLayout {
+    #[default]
+    None,
+    SeparateFiles,
+    SideBySide,
+    TopBottom,
+}
+
+#[derive(Deserialize, Serialize, Default, Clone, Debug)]
+#[serde(default)]
+pub struct DualLensConfig {
+    pub layout: DualLensLayout,
+    /// Calibration for the second lens (same JSON structure as the primary LensProfile)
+    pub lens2_profile: Option<Box<LensProfile>>,
+    /// Fine-tune offset applied ON TOP of the built-in 180° Y base rotation, degrees [pitch, yaw, roll].
+    /// For a perfectly back-to-back camera (Insta360 ONE R 360 etc.) this is [0.0, 0.0, 0.0].
+    pub lens2_rotation_offset: [f64; 3],
 }
 
 impl LensProfile {

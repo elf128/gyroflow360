@@ -30,6 +30,7 @@ vec2 undistort_point(vec2 pos) {
 }
 
 vec2 distort_point(float x, float y, float z) {
+    if (z <= 0.0) return vec2(-99999.0, -99999.0);
     vec2 pos = vec2(x, y) / z;
     float ru2 = (pos.x * pos.x + pos.y * pos.y);
     float r = sqrt(ru2);

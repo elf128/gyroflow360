@@ -31,6 +31,8 @@ MenuItem {
 
     property bool fetched_from_github: false;
     property bool selected_manually: false;
+    property bool isDualLens: false;
+    property string dualLensSecondaryPath: "";
 
     FileDialog {
         id: fileDialog;
@@ -44,6 +46,13 @@ MenuItem {
     function loadFile(url: url): void {
         root.selected_manually = true;
         controller.load_lens_profile(url.toString());
+    }
+
+    FileDialog {
+        id: secondaryFileDialog;
+        title: qsTr("Choose secondary lens video file");
+        nameFilters: Qt.platform.os === "android" ? undefined : [qsTr("Video files") + " (*.insv *.mp4 *.mov *.mkv *)"];
+        onAccepted: controller.open_dual_lens_file(secondaryFileDialog.selectedFile.toString());
     }
 
     function loadGyroflow(obj: var): void {
@@ -75,6 +84,9 @@ MenuItem {
     }
     Connections {
         target: controller;
+        function onDual_lens_file_changed(path: string): void {
+            root.dualLensSecondaryPath = path;
+        }
         function onAll_profiles_loaded(): void {
             if (!lensProfilesListPrepared) { // If it's the first load
                 controller.request_profile_ratings();
@@ -130,6 +142,8 @@ MenuItem {
                     officialInfo.show = !obj.official && !settings.value("rated-profile-" + checksum, false);
                     officialInfo.canRate = true;
                     officialInfo.thankYou = false;
+                    root.isDualLens = !!(obj.dual_lens && obj.dual_lens.lens2_profile);
+                    if (!root.isDualLens) { root.dualLensSecondaryPath = ""; }
                     root.profileName = (filepath || obj.name || "").replace(/^.*?[\/\\]([^\/\\]+?)$/, "$1");
                     root.profileOriginalJson = json_str;
                     root.profileChecksum = checksum;
@@ -288,6 +302,34 @@ MenuItem {
         property string videoRatio: (root.videoWidth / Math.max(1, root.videoHeight)).toFixed(3);
         text: lensRatio != videoRatio? qsTr("Lens profile aspect ratio doesn't match the file aspect ratio. The result will not look correct.") :
                                        qsTr("Lens profile dimensions don't match the file dimensions. The result may not look correct.");
+    }
+
+    // Dual-lens status row (only shown when the loaded profile has a second lens)
+    Item {
+        width: parent.width;
+        height: visible ? dualLensRow.height + 8 * dpiScale : 0;
+        visible: root.isDualLens;
+        clip: true;
+        Row {
+            id: dualLensRow;
+            y: 4 * dpiScale;
+            width: parent.width;
+            spacing: 6 * dpiScale;
+            BasicText {
+                text: root.dualLensSecondaryPath
+                    ? qsTr("Dual lens: ") + root.dualLensSecondaryPath.replace(/^.*[\/\\]/, "")
+                    : qsTr("Dual lens: second file not found – click Browse");
+                color: root.dualLensSecondaryPath ? "#aaffaa" : "#ffdd88";
+                elide: Text.ElideMiddle;
+                width: parent.width - browseSecBtn.width - 6 * dpiScale;
+            }
+            Button {
+                id: browseSecBtn;
+                text: qsTr("Browse");
+                iconName: "file-empty";
+                onClicked: secondaryFileDialog.open2();
+            }
+        }
     }
 
     TableList {

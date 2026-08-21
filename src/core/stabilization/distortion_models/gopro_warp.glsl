@@ -22,14 +22,13 @@ vec2 gopro_map(vec2 uv) {
     );
 }
 
+// uv in [-1, 1] centered at zero; gopro_map works in [-0.5, 0.5]
 vec2 digital_undistort_point(vec2 uv) {
     float factor = params.digital_lens_params[3].z; if (factor == 0.0) factor = 1.0;
-    vec2 out_c2 = vec2(params.output_width, params.output_height);
-    uv = (uv / out_c2) - 0.5;
+    uv = uv * 0.5;
     uv = gopro_map(uv);
     uv.x = uv.x / factor;
-    uv = (uv + 0.5) * out_c2;
-    return uv;
+    return uv * 2.0;
 }
 vec2 digital_distort_point(vec2 uv) {
     float factor = params.digital_lens_params[3].z; if (factor == 0.0) factor = 1.0;

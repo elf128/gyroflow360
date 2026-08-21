@@ -57,6 +57,7 @@ impl GoPro {
     /// `(x, y, z)` is the ray; returns normalized coord (× f + c → image pixel).
     /// From ray to image.
     pub fn distort_point(&self, x: f32, y: f32, z: f32, params: &KernelParams) -> (f32, f32) {
+        if z <= 0.0 { return (-99999.0, -99999.0); }
         let pos = (x / z, y / z);
         if params.k[1] == 0.0 { return pos; }
         let r = (pos.0 * pos.0 + pos.1 * pos.1).sqrt();

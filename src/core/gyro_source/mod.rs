@@ -70,7 +70,10 @@ pub struct GyroSource {
     offsets_linear: BTreeMap<i64, f64>, // <microseconds timestamp, offset in milliseconds> - linear fit
     offsets_adjusted: BTreeMap<i64, f64>, // <timestamp + offset, offset>
 
-    pub file_url: String
+    pub file_url: String,
+
+    // Orientation explicitly set by a lens profile; takes priority over telemetry.
+    pub forced_imu_orientation: Option<String>,
 }
 
 impl GyroSource {
@@ -572,6 +575,9 @@ impl GyroSource {
         self.clear();
 
         self.imu_transforms.imu_orientation = telemetry.imu_orientation.clone();
+        if let Some(ref forced) = self.forced_imu_orientation {
+            self.imu_transforms.imu_orientation = Some(forced.clone());
+        }
 
         let has_quats = !telemetry.quaternions.is_empty();
         let has_raw_imu = !telemetry.raw_imu.is_empty();

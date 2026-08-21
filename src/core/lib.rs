@@ -350,6 +350,15 @@ impl StabilizationManager {
         if !from_db {
             lens.resolve_interpolations(&db);
         }
+        let imu_orientation = lens.imu_orientation.clone();
+        drop(lens);
+        {
+            let mut gyro = self.gyro.write();
+            gyro.forced_imu_orientation = imu_orientation.clone();
+            if let Some(orientation) = imu_orientation {
+                gyro.imu_transforms.imu_orientation = Some(orientation);
+            }
+        }
         result
     }
 
@@ -935,6 +944,14 @@ impl StabilizationManager {
         }
     }
 
+    /// Upload raw pixel data for the secondary (lens 2) texture/buffer used by the dual-lens shader.
+    /// For the preview path: data must be RGBA8, same dimensions as the primary input frame.
+    pub fn upload_input2_data(&self, data: &[u8], width: u32, height: u32, bytes_per_row: u32) {
+        if let Some(undist) = self.stabilization.try_read_for(std::time::Duration::from_millis(100)) {
+            undist.upload_input2_data(data, width, height, bytes_per_row);
+        }
+    }
+
     pub fn set_video_rotation(&self, v: f64) { self.params.write().video_rotation = v; self.invalidate_smoothing(); }
 
     pub fn trim_ranges(&self) -> Vec<(f64, f64)> { self.params.read().trim_ranges.clone() }
@@ -1205,7 +1222,9 @@ impl StabilizationManager {
         *self.input_file.write() = InputFile::default();
         *self.camera_id.write() = None;
 
-        *self.gyro.write() = GyroSource::new();
+        let mut new_gyro = GyroSource::new();
+        new_gyro.forced_imu_orientation = self.lens.read().imu_orientation.clone();
+        *self.gyro.write() = new_gyro;
         self.keyframes.write().clear();
 
         self.pose_estimator.clear();
@@ -2036,6 +2055,11 @@ impl StabilizationManager {
             KeyframeType::SmoothingParamPitch |
             KeyframeType::SmoothingParamRoll |
             KeyframeType::SmoothingParamYaw => self.invalidate_smoothing(),
+
+            KeyframeType::ViewportLookAtX |
+            KeyframeType::ViewportLookAtY |
+            KeyframeType::ViewportLookAtZ => self.invalidate_zooming(),
+
             _ => { }
         }
     }

@@ -42,6 +42,7 @@ impl PtLens {
     }
 
     pub fn distort_point(&self, x: f32, y: f32, z: f32, params: &KernelParams) -> (f32, f32) {
+        if z <= 0.0 { return (-99999.0, -99999.0); }
         let x = x / z;
         let y = y / z;
         let ru2 = x.powi(2) + y.powi(2);

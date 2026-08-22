@@ -101,6 +101,7 @@ fn main() {
     }
     // config.define("QT_QML_DEBUG", None);
     println!("cargo:rerun-if-changed=src/qt_gpu/qrhi_undistort.cpp");
+    println!("cargo:rerun-if-changed=src/qt_gpu/viewport_item.cpp");
 
     if target_os == "ios" {
         println!("cargo:rerun-if-changed=_deployment/ios/qml_plugins.cpp");

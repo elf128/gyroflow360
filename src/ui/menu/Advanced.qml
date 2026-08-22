@@ -73,7 +73,6 @@ MenuItem {
                     case 3: target_height = 720;  window.videoArea.vid.setProperty("scale", "1280x720");  break;
                     case 4: target_height = 480;  window.videoArea.vid.setProperty("scale", "640x480");   break;
                 }
-
                 controller.set_preview_resolution(target_height, window.videoArea.vid);
                 settings.setValue("previewResolution", currentIndex);
             }

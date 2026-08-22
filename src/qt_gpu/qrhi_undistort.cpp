@@ -73,6 +73,7 @@ public:
     QString shaderPath() { return m_shaderPath; }
     QRhiTexture *itemTexturePtr() { return m_itemTexturePtr; }
     unsigned int sizeForRS() { return m_sizeForRS; }
+    QRhiTextureRenderTarget *externalRT() { return m_externalRT; }
 
     bool sourcesChanged() const {
         return m_filesChanged.exchange(false);
@@ -155,7 +156,7 @@ public:
     // Called from the beforeRendering handler (render thread) so RHI operations are valid.
     // All other RHI resources (textures, buffers, SRB) are reused unchanged.
     void reinit() {
-        if (!m_item || !m_srb || !m_rtRp) return;
+        if (!m_item || !m_srb || !m_externalRT) return;
         auto context = m_item->rhiContext();
         if (!context) return;
         auto rhi = context->rhi();
@@ -203,7 +204,7 @@ public:
         });
         newPipeline->setVertexInputLayout(inputLayout);
         newPipeline->setShaderResourceBindings(m_srb.get());
-        newPipeline->setRenderPassDescriptor(m_rtRp.get());
+        newPipeline->setRenderPassDescriptor(m_externalRTRP);
         if (!newPipeline->create()) {
             qWarn2("reinit") << "Pipeline creation failed during hot-reload — black screen";
             m_pipeline.reset(); // null pipeline → render() returns false → black screen
@@ -240,19 +241,14 @@ public:
         mvp.scale(2.0f);
         u->updateDynamicBuffer(m_drawingUniform.get(), 0, 64, mvp.constData());
 
-        const QSize size = m_item->textureSize();
-        cb->beginPass(m_rt.get(), QColor(Qt::black), { 1.0f, 0 }, u);
+        cb->beginPass(m_externalRT, QColor(Qt::black), { 1.0f, 0 }, u);
         cb->setGraphicsPipeline(m_pipeline.get());
-        cb->setViewport({ 0, 0, float(size.width()), float(size.height()) });
+        cb->setViewport({ 0, 0, float(m_outputSize.width()), float(m_outputSize.height()) });
         cb->setShaderResources();
         QRhiCommandBuffer::VertexInput vbufBinding(m_vertexBuffer.get(), 0);
         cb->setVertexInput(0, 1, &vbufBinding, m_indexBuffer.get(), 0, QRhiCommandBuffer::IndexUInt16);
         cb->drawIndexed(6);
         cb->endPass();
-
-        u = rhi->nextResourceUpdateBatch();
-        u->copyTexture(m_item->rhiTexture(), m_texIn.get(), {});
-        cb->resourceUpdate(u);
     }
 
     // binary: {repo}/target/{release|debug}/gyroflow  →  repo root is ../../
@@ -400,10 +396,10 @@ public:
         return getShader(tmpQsb);
     }
 
-    bool init(MDKPlayer *item, QSize textureSize, QSize outputSize, const QString &shaderPath,
+    bool init(MDKPlayer *item, GyroflowViewport *viewport, QSize textureSize, QSize outputSize, const QString &shaderPath,
               const QString &distortionModel, const QString &digitalLens,
               int kernelParmsSize, unsigned int sizeForRS, QSize canvasSize) {
-        if (!item) return false;
+        if (!item || !viewport) return false;
         auto context = item->rhiContext();
         auto rhi = context->rhi();
 
@@ -417,6 +413,8 @@ public:
         m_digitalLens = digitalLens;
         m_kernelParmsSize = kernelParmsSize;
         m_canvasSize = canvasSize;
+        m_externalRT   = viewport->renderTarget();
+        m_externalRTRP = viewport->renderPassDescriptor();
         m_watchedSourcePaths.clear();
         m_watchedSourceMtimes.clear();
         stopWatcher();
@@ -434,17 +432,7 @@ public:
         if (!digitalLens.isEmpty())
             addToWatch(base + "src/core/stabilization/distortion_models/" + digitalLens + ".glsl");
 
-        m_texIn.reset(rhi->newTexture(QRhiTexture::RGBA8, textureSize, 1, QRhiTexture::RenderTarget | QRhiTexture::UsedAsTransferSource));
-        if (!m_texIn->create()) { qDebug2("init") << "failed to create m_texIn"; return false; }
-
-        m_rt.reset(rhi->newTextureRenderTarget({ QRhiColorAttachment(m_texIn.get()) }));
-        if (!m_rt) { qDebug2("init") << "failed to get new m_rt"; return false; }
-
-        m_rtRp.reset(m_rt->newCompatibleRenderPassDescriptor());
-        if (!m_rtRp) { qDebug2("init") << "failed to create m_rtRp"; return false; }
-
-        m_rt->setRenderPassDescriptor(m_rtRp.get());
-        if (!m_rt->create()) { qDebug2("init") << "failed to create m_rt"; return false; }
+        if (!m_externalRT || !m_externalRTRP) { qDebug2("init") << "viewport render target not ready"; return false; }
 
         m_kernelParams.reset(rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, kernelParmsSize));
         if (!m_kernelParams->create()) { qDebug2("init") << "failed to create m_kernelParams"; return false; }
@@ -536,7 +524,7 @@ public:
             });
             m_pipeline->setVertexInputLayout(inputLayout);
             m_pipeline->setShaderResourceBindings(m_srb.get());
-            m_pipeline->setRenderPassDescriptor(m_rtRp.get());
+            m_pipeline->setRenderPassDescriptor(m_externalRTRP);
             if (!m_pipeline->create()) {
                 qWarn2("init") << "Pipeline creation failed — black screen until shader is fixed";
                 m_pipeline.reset();
@@ -559,7 +547,7 @@ public:
 
     bool render(MDKPlayer *item, uint8_t *params, uint paramsLen, uint8_t *matrices, uint matricesLen, uint8_t *canvas, uint canvasLen, float *meshData, uint meshDataLen) {
         if (!item->qmlItem() || !item->rhiTexture() || !item->qmlWindow()) return false;
-        if (!m_pipeline) return false; // shader invalid — black screen until reinit() succeeds
+        if (!m_pipeline || !m_externalRT) return false;
         m_hadFirstRender = true;
         auto context = item->rhiContext();
         auto rhi = context->rhi();
@@ -571,7 +559,6 @@ public:
         if (meshDataLen > 0) memcpy(meshDataBuffer.data(), meshData, meshDataLen*4);
         else if (meshDataBuffer[0] != 0) memset(meshDataBuffer.data(), 0, meshDataBuffer.size());
 
-        const QSize size = item->textureSize();
         QRhiCommandBuffer *cb = context->currentFrameCommandBuffer();
 
         QRhiResourceUpdateBatch *u = rhi->nextResourceUpdateBatch();
@@ -600,18 +587,16 @@ public:
         mvp.scale(2.0f);
         u->updateDynamicBuffer(m_drawingUniform.get(), 0, 64, mvp.constData());
 
-        cb->beginPass(m_rt.get(), QColor(Qt::black), { 1.0f, 0 }, u);
+        // Render shader output directly into the viewport's render target.
+        // No intermediate texture, no copyTexture — MDK is done after this.
+        cb->beginPass(m_externalRT, QColor(Qt::black), { 1.0f, 0 }, u);
         cb->setGraphicsPipeline(m_pipeline.get());
-        cb->setViewport({ 0, 0, float(size.width()), float(size.height()) });
+        cb->setViewport({ 0, 0, float(m_outputSize.width()), float(m_outputSize.height()) });
         cb->setShaderResources();
         QRhiCommandBuffer::VertexInput vbufBinding(m_vertexBuffer.get(), 0);
         cb->setVertexInput(0, 1, &vbufBinding, m_indexBuffer.get(), 0, QRhiCommandBuffer::IndexUInt16);
         cb->drawIndexed(6);
         cb->endPass();
-
-        u = rhi->nextResourceUpdateBatch();
-        u->copyTexture(item->rhiTexture(), m_texIn.get(), {});
-        cb->resourceUpdate(u);
 
         rhi->finish();
 
@@ -630,7 +615,10 @@ public:
 
     QRhiTexture *m_itemTexturePtr{nullptr};
 
-    QScopedPointer<QRhiTexture> m_texIn;
+    // External render target — owned by GyroflowViewport, not by this class.
+    QRhiTextureRenderTarget  *m_externalRT   {nullptr};
+    QRhiRenderPassDescriptor *m_externalRTRP {nullptr};
+
     QScopedPointer<QRhiTexture> m_texMatrices;
     QScopedPointer<QRhiTexture> m_texCanvas;
     QScopedPointer<QRhiBuffer> m_kernelParams;
@@ -663,9 +651,6 @@ public:
     QScopedPointer<QRhiSampler> m_meshDataSampler;
     QScopedPointer<QRhiShaderResourceBindings> m_srb;
     QScopedPointer<QRhiGraphicsPipeline> m_pipeline;
-
-    QScopedPointer<QRhiTextureRenderTarget> m_rt;
-    QScopedPointer<QRhiRenderPassDescriptor> m_rtRp;
 
     QScopedPointer<QRhiReadbackResult> m_readbackResult;
 

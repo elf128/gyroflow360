@@ -10,10 +10,13 @@ use cpp::*;
 use qmetaobject::{ QSize, QString };
 
 cpp! {{
+    #include <QJSValue>
+    #include <QQuickItem>
+    #include "src/qt_gpu/viewport_item.cpp"
     #include "src/qt_gpu/qrhi_undistort.cpp"
 }}
 
-pub fn render(mdkplayer: &MDKPlayerWrapper, timestamp: f64, frame: usize, width: u32, height: u32, stab: Arc<StabilizationManager>, buffers: &mut Buffers) -> Option<ProcessedInfo> {
+pub fn render(mdkplayer: &MDKPlayerWrapper, viewport_ptr: usize, timestamp: f64, frame: usize, width: u32, height: u32, stab: Arc<StabilizationManager>, buffers: &mut Buffers) -> Option<ProcessedInfo> {
     if stab.prevent_recompute.load(std::sync::atomic::Ordering::SeqCst) { return None; }
 
     let mut timestamp_us = (timestamp * 1000.0).round() as i64;
@@ -62,8 +65,13 @@ pub fn render(mdkplayer: &MDKPlayerWrapper, timestamp: f64, frame: usize, width:
             let canvas_size = undist.drawing.get_size();
             let canvas_size = QSize { width: canvas_size.0 as u32, height: canvas_size.1 as u32 };
 
-            let ok = cpp!(unsafe [mdkplayer as "MDKPlayerWrapper *", output_size as "QSize", shader_path as "QString", distortion_model as "QString", digital_lens as "QString", width as "uint32_t", height as "uint32_t", params_ptr as "uint8_t*", matrices_ptr as "uint8_t*", canvas_ptr as "uint8_t*", mesh_data_ptr as "float*", mesh_data_len as "uint32_t", matrices_len as "uint32_t", params_len as "uint32_t", canvas_len as "uint32_t", canvas_size as "QSize", size_for_rs as "uint32_t"] -> bool as "bool" {
+            let ok = cpp!(unsafe [mdkplayer as "MDKPlayerWrapper *", viewport_ptr as "uintptr_t", output_size as "QSize", shader_path as "QString", distortion_model as "QString", digital_lens as "QString", width as "uint32_t", height as "uint32_t", params_ptr as "uint8_t*", matrices_ptr as "uint8_t*", canvas_ptr as "uint8_t*", mesh_data_ptr as "float*", mesh_data_len as "uint32_t", matrices_len as "uint32_t", params_len as "uint32_t", canvas_len as "uint32_t", canvas_size as "QSize", size_for_rs as "uint32_t"] -> bool as "bool" {
                 if (!mdkplayer || !mdkplayer->mdkplayer || shader_path.isEmpty() || output_size.isEmpty()) return false;
+
+                auto *viewport = reinterpret_cast<GyroflowViewport *>(viewport_ptr);
+                // Render target may not be ready yet on the first frame (before the first
+                // updatePaintNode completes). Return false to skip this frame.
+                if (!viewport || !viewport->renderTarget()) return false;
 
                 auto rhiUndistortion = static_cast<QtRHIUndistort *>(mdkplayer->mdkplayer->userData());
 
@@ -84,10 +92,11 @@ pub fn render(mdkplayer: &MDKPlayerWrapper, timestamp: f64, frame: usize, width:
                 || rhiUndistortion->texSize() != QSize(width, height)
                 || rhiUndistortion->shaderPath() != shader_path
                 || rhiUndistortion->sizeForRS() != size_for_rs
-                || rhiUndistortion->itemTexturePtr() != mdkplayer->mdkplayer->rhiTexture()) {
+                || rhiUndistortion->itemTexturePtr() != mdkplayer->mdkplayer->rhiTexture()
+                || rhiUndistortion->externalRT() != viewport->renderTarget()) {
                     delete rhiUndistortion;
                     rhiUndistortion = new QtRHIUndistort();
-                    if (!rhiUndistortion->init(mdkplayer->mdkplayer, QSize(width, height), output_size, shader_path, distortion_model, digital_lens, params_len, size_for_rs, canvas_size)) {
+                    if (!rhiUndistortion->init(mdkplayer->mdkplayer, viewport, QSize(width, height), output_size, shader_path, distortion_model, digital_lens, params_len, size_for_rs, canvas_size)) {
                         qDebug2("render") << "Failed to initialize";
                         delete rhiUndistortion;
                         mdkplayer->mdkplayer->setUserData(nullptr);
@@ -113,4 +122,34 @@ pub fn render(mdkplayer: &MDKPlayerWrapper, timestamp: f64, frame: usize, width:
         }
     }
     None
+}
+
+// ---------------------------------------------------------------------------
+// Viewport lifecycle helpers — called from controller.rs (no cpp! there).
+// ---------------------------------------------------------------------------
+
+/// Create a GyroflowViewport as a C++ child of the given QML container item.
+/// Returns the raw pointer as usize (0 on failure).
+pub fn create_viewport(container: &qmetaobject::QJSValue) -> usize {
+    cpp!(unsafe [container as "QJSValue *"] -> usize as "uintptr_t" {
+        QObject *obj = container->toQObject();
+        auto *parent = qobject_cast<QQuickItem *>(obj);
+        if (!parent) return 0;
+        auto *viewport = new GyroflowViewport(parent);
+        viewport->setWidth(parent->width());
+        viewport->setHeight(parent->height());
+        QObject::connect(parent, &QQuickItem::widthChanged,  parent, [viewport, parent]() { viewport->setWidth(parent->width()); });
+        QObject::connect(parent, &QQuickItem::heightChanged, parent, [viewport, parent]() { viewport->setHeight(parent->height()); });
+        return reinterpret_cast<uintptr_t>(viewport);
+    })
+}
+
+/// Notify the viewport that the desired output resolution has changed.
+/// Safe to call from the main thread; GPU resource recreation is deferred to the render thread.
+pub fn set_viewport_output_size(vp_ptr: usize, w: u32, h: u32) {
+    if vp_ptr == 0 { return; }
+    cpp!(unsafe [vp_ptr as "uintptr_t", w as "uint32_t", h as "uint32_t"] {
+        auto *viewport = reinterpret_cast<GyroflowViewport *>(vp_ptr);
+        if (viewport) viewport->setOutputSize(QSize(w, h));
+    });
 }

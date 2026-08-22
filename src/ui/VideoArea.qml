@@ -874,6 +874,16 @@ Item {
                         }
                     }
                 }
+                // Viewport display: the shader writes here; MDK never owns this texture.
+                // Declared after MDKVideo so QSG renders MDKVideo first (firing processTexture),
+                // then renders this item (displaying the shader output). GridGuide is declared
+                // after this so it composites on top as an overlay.
+                Item {
+                    id: gyroflowViewportContainer;
+                    anchors.fill: vid;
+                    Component.onCompleted: controller.init_viewport(this);
+                }
+
                 GridGuide {
                     id: gridGuide;
                     anchors.fill: vid;

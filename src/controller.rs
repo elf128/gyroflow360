@@ -297,6 +297,13 @@ pub struct Controller {
     preview_resolution: i32,
     processing_resolution: i32,
 
+    // Raw pointer to the C++ GyroflowViewport item. Set once from QML via
+    // init_viewport(); shared into the processTexture closure as an Arc<AtomicUsize>
+    // so the closure can read it without borrowing self.
+    viewport_ptr: Arc<AtomicUsize>,
+
+    init_viewport: qt_method!(fn(&mut self, viewport: QJSValue)),
+
     current_fov: qt_property!(f64; NOTIFY processing_info_changed),
     current_minimal_fov: qt_property!(f64; NOTIFY processing_info_changed),
     current_focal_length: qt_property!(f64; NOTIFY processing_info_changed),
@@ -321,6 +328,7 @@ impl Controller {
         Self {
             preview_resolution: -1,
             processing_resolution: 720,
+            viewport_ptr: Arc::new(AtomicUsize::new(0)),
             ..Default::default()
         }
     }
@@ -957,6 +965,13 @@ impl Controller {
         }
     }
 
+    fn init_viewport(&mut self, container: QJSValue) {
+        let vp_ptr = qrhi_undistort::create_viewport(&container);
+        if vp_ptr != 0 {
+            self.viewport_ptr.store(vp_ptr, SeqCst);
+        }
+    }
+
     fn set_processing_resolution(&mut self, target_height: i32) {
         self.processing_resolution = target_height;
         self.stabilizer.pose_estimator.clear();
@@ -1047,6 +1062,7 @@ impl Controller {
             }));
             let stab = self.stabilizer.clone();
             let preview_pipeline = self.preview_pipeline.clone();
+            let viewport_ptr = self.viewport_ptr.clone();
             let out_pixels = RefCell::new(Vec::new());
             let update_info = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, (fov, minimal_fov, focal_length, info): (f64, f64, Option<f64>, QString)| {
                 this.current_fov = fov;
@@ -1066,6 +1082,9 @@ impl Controller {
                 let _time = std::time::Instant::now();
 
                 if preview_pipeline.load(SeqCst) == 0 {
+                    let vp = viewport_ptr.load(SeqCst);
+                    if vp == 0 { return true; } // viewport not yet initialised
+
                     let mut buffers = Buffers{
                         input:  BufferDescription { size: (width as usize, height as usize, width as usize * 4), ..Default::default() },
                         output: BufferDescription { size: (width as usize, height as usize, width as usize * 4), ..Default::default() },
@@ -1078,7 +1097,7 @@ impl Controller {
                     let frame = (frame as i32 + offset).max(0) as u32;
                     let timestamp_ms = timestamp_ms + (offset as f64 / fps * 1000.0).round();
 
-                    if let Some(ret) = qrhi_undistort::render(vid1.get_mdkplayer(), timestamp_ms, frame as usize, width, height, stab.clone(), &mut buffers) {
+                    if let Some(ret) = qrhi_undistort::render(vid1.get_mdkplayer(), vp, timestamp_ms, frame as usize, width, height, stab.clone(), &mut buffers) {
                         update_info2((ret.fov, ret.minimal_fov, ret.focal_length, QString::from(format!("Processing {}x{} using {} took {:.2}ms", width, height, ret.backend, _time.elapsed().as_micros() as f64 / 1000.0))));
                     } else {
                         update_info2((1.0, 1.0, None, QString::from("---")));
@@ -1493,6 +1512,8 @@ impl Controller {
             self.stabilizer.recompute_undistortion();
             self.request_recompute();
         }
+        // Propagate to the display viewport so it recreates its output texture.
+        qrhi_undistort::set_viewport_output_size(self.viewport_ptr.load(SeqCst), w as u32, h as u32);
     }
 
     wrap_simple_method!(override_video_fps,         v: f64, r: bool; recompute; update_offset_model);

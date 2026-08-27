@@ -52,7 +52,7 @@ MenuItem {
     }
     Label {
         position: Label.LeftPosition;
-        text: qsTr("Preview resolution");
+        text: qsTr("Decoding resolution");
 
         ComboBox {
             id: previewResolution;
@@ -75,6 +75,30 @@ MenuItem {
                 }
                 controller.set_preview_resolution(target_height, window.videoArea.vid);
                 settings.setValue("previewResolution", currentIndex);
+            }
+        }
+    }
+
+    Label {
+        position: Label.LeftPosition;
+        text: qsTr("Preview resolution");
+
+        ComboBox {
+            id: previewOutputResolution;
+            // Export  — shader runs at export output dimensions
+            // Viewport — shader runs at the on-screen viewport pixel size
+            // View/N  — viewport size divided by N in each dimension
+            model: [QT_TRANSLATE_NOOP("Popup", "Export"), QT_TRANSLATE_NOOP("Popup", "Viewport"), "View/2", "View/4", "View/8"];
+            font.pixelSize: 12 * dpiScale;
+            width: parent.width;
+            currentIndex: 1;
+            Component.onCompleted: {
+                if (settings.value("previewOutputResolution", -1) != -1)
+                    currentIndex = +settings.value("previewOutputResolution", -1);
+            }
+            onCurrentIndexChanged: {
+                controller.set_preview_resolution_mode(currentIndex);
+                settings.setValue("previewOutputResolution", currentIndex);
             }
         }
     }

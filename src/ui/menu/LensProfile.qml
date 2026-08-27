@@ -8,7 +8,7 @@ import "../components/"
 
 MenuItem {
     id: root;
-    text: qsTr("Lens profile");
+    text: qsTr("Camera Lens Profile");
     iconName: "lens";
     objectName: "lens";
 

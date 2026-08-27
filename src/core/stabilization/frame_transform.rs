@@ -326,12 +326,16 @@ impl FrameTransform {
                 }
             }
 
-            // K_out as 4×4: focal lengths in cols 0/1, principal point in W col (col 3), Z passthrough in col 2.
+            // K_out in centered proportional space: focal lengths normalized by output
+            // dimensions, no principal point. The shader works in [-0.5, 0.5] with
+            // (0,0) at frame center, so cx/cy collapse to zero.
+            let out_w = params.output_width as f32;
+            let out_h = params.output_height as f32;
             let k4 = Matrix4::<f32>::new(
-                new_k[(0, 0)] as f32, 0.0,                  0.0, new_k[(0, 2)] as f32,
-                0.0,                  new_k[(1, 1)] as f32,  0.0, new_k[(1, 2)] as f32,
-                0.0,                  0.0,                   0.0, 1.0,
-                0.0,                  0.0,                   1.0, 0.0,
+                new_k[(0, 0)] as f32 / out_w, 0.0,                           0.0, 0.0,
+                0.0,                           new_k[(1, 1)] as f32 / out_h, 0.0, 0.0,
+                0.0,                           0.0,                           0.0, 1.0,
+                0.0,                           0.0,                           1.0, 0.0,
             );
             let r4 = Matrix4::<f32>::new(
                 r[(0, 0)] as f32, r[(0, 1)] as f32, r[(0, 2)] as f32, 0.0,
@@ -420,7 +424,10 @@ impl FrameTransform {
             background_mode:          params.background_mode as i32,
             background_margin:        background_margin as f32,
             background_margin_feather:background_feather as f32,
-            translation2d: [(adaptive_zoom_center_x * params.width as f64 / fov) as f32, (adaptive_zoom_center_y * params.height as f64 / fov) as f32],
+            translation2d: [
+                (adaptive_zoom_center_x * params.width as f64 / fov / params.output_width  as f64) as f32,
+                (adaptive_zoom_center_y * params.height as f64 / fov / params.output_height as f64) as f32,
+            ],
             translation3d: [0.0, 0.0, 0.0, 0.0], // currently unused
             digital_lens_params,
             light_refraction_coefficient: light_refraction_coefficient as f32,

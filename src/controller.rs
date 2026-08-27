@@ -121,6 +121,7 @@ pub struct Controller {
 
     recompute_threaded: qt_method!(fn(&mut self)),
     request_recompute: qt_signal!(),
+    request_redraw: qt_signal!(),
 
     stab_enabled: qt_property!(bool; WRITE set_stab_enabled),
     show_detected_features: qt_property!(bool; WRITE set_show_detected_features),
@@ -177,7 +178,7 @@ pub struct Controller {
 
     set_trim_ranges: qt_method!(fn(&self, trim_ranges: QString)),
 
-    set_output_size: qt_method!(fn(&self, width: usize, height: usize)),
+    set_output_size: qt_method!(fn(&mut self, width: usize, height: usize)),
 
     load_default_preset: qt_method!(fn(&mut self)),
 
@@ -302,7 +303,21 @@ pub struct Controller {
     // so the closure can read it without borrowing self.
     viewport_ptr: Arc<AtomicUsize>,
 
-    init_viewport: qt_method!(fn(&mut self, viewport: QJSValue)),
+    init_viewport:             qt_method!(fn(&mut self, viewport: QJSValue)),
+    set_viewport_display_size: qt_method!(fn(&mut self, w: u32, h: u32)),
+    set_preview_resolution_mode: qt_method!(fn(&mut self, mode: i32)),
+    set_preview_aspect_ratio:  qt_method!(fn(&mut self, ratio: f64)),
+
+    // 0 = Export (Export panel drives output size)
+    // 1 = Viewport, 2 = View/2, 3 = View/4, 4 = View/8
+    preview_resolution_mode: i32,
+    preview_aspect_ratio: f64,   // 0.0 = source AR
+    viewport_display_w: u32,
+    viewport_display_h: u32,
+    // Dimensions last set by the Export panel. Used as stab.output_size in mode 0.
+    // Initialised to the video size on first load if the Export panel hasn't set it yet.
+    export_output_w: usize,
+    export_output_h: usize,
 
     current_fov: qt_property!(f64; NOTIFY processing_info_changed),
     current_minimal_fov: qt_property!(f64; NOTIFY processing_info_changed),
@@ -328,6 +343,8 @@ impl Controller {
         Self {
             preview_resolution: -1,
             processing_resolution: 720,
+            preview_resolution_mode: 1, // Viewport by default
+            preview_aspect_ratio: 0.0,
             viewport_ptr: Arc::new(AtomicUsize::new(0)),
             ..Default::default()
         }
@@ -732,7 +749,11 @@ impl Controller {
 
             if duration_ms > 0.0 && fps > 0.0 {
                 stab.init_from_video_data(duration_ms, fps, frame_count, video_size);
-                stab.set_output_size(video_size.0, video_size.1);
+                if self.export_output_w == 0 || self.export_output_h == 0 {
+                    self.export_output_w = video_size.0;
+                    self.export_output_h = video_size.1;
+                }
+                self.recompute_preview_output_size();
             }
         }
     }
@@ -800,7 +821,11 @@ impl Controller {
             if duration_ms > 0.0 && fps > 0.0 {
                 if is_main_video {
                     stab.init_from_video_data(duration_ms, fps, frame_count, video_size);
-                    stab.set_output_size(video_size.0, video_size.1);
+                    if self.export_output_w == 0 || self.export_output_h == 0 {
+                        self.export_output_w = video_size.0;
+                        self.export_output_h = video_size.1;
+                    }
+                    self.recompute_preview_output_size();
                 }
 
                 self.loading_gyro_in_progress = true;
@@ -960,7 +985,8 @@ impl Controller {
 
                 vid.setSurfaceSize(new_w, new_h);
                 vid.setRotation(vid.getRotation());
-                // vid.setCurrentFrame(vid.currentFrame);
+                let frame = vid.currentFrame;
+                vid.setCurrentFrame(frame);
             }
         }
     }
@@ -970,6 +996,65 @@ impl Controller {
         if vp_ptr != 0 {
             self.viewport_ptr.store(vp_ptr, SeqCst);
         }
+    }
+
+    fn set_viewport_display_size(&mut self, w: u32, h: u32) {
+        self.viewport_display_w = w;
+        self.viewport_display_h = h;
+        self.recompute_preview_output_size();
+    }
+
+    fn set_preview_resolution_mode(&mut self, mode: i32) {
+        self.preview_resolution_mode = mode;
+        self.recompute_preview_output_size();
+    }
+
+    fn set_preview_aspect_ratio(&mut self, ratio: f64) {
+        self.preview_aspect_ratio = ratio;
+        self.recompute_preview_output_size();
+    }
+
+    fn recompute_preview_output_size(&self) {
+        let vp_ptr = self.viewport_ptr.load(SeqCst);
+        if vp_ptr == 0 { return; }
+        let ew = self.export_output_w;
+        let eh = self.export_output_h;
+        if ew == 0 || eh == 0 { return; }
+
+        // The shader works in centered proportional space, so normalized matrices are
+        // resolution-independent. Stabilizer always runs at export dimensions.
+        if self.stabilizer.set_output_size(ew, eh) {
+            self.stabilizer.recompute_undistortion();
+            self.request_recompute();
+        }
+
+        // Viewport texture size is mode-dependent and independent of stab output size.
+        let (vp_w, vp_h) = if self.preview_resolution_mode == 0 {
+            (ew as u32, eh as u32)
+        } else {
+            let dw = self.viewport_display_w as f64;
+            let dh = self.viewport_display_h as f64;
+            if dw < 1.0 || dh < 1.0 { return; }
+
+            let divisor = match self.preview_resolution_mode {
+                2 => 2.0f64, // View/2
+                3 => 4.0,    // View/4
+                4 => 8.0,    // View/8
+                _ => 1.0,    // Viewport (mode 1)
+            };
+
+            let (bw, bh) = (dw / divisor, dh / divisor);
+            let (w, h) = if self.preview_aspect_ratio > 0.0 {
+                let ar = self.preview_aspect_ratio;
+                if ar > bw / bh { (bw, (bw / ar).round()) } else { ((bh * ar).round(), bh) }
+            } else {
+                (bw, bh)
+            };
+            ((w as u32).max(4), (h as u32).max(4))
+        };
+
+        qrhi_undistort::set_viewport_output_size(vp_ptr, vp_w, vp_h);
+        self.request_redraw();
     }
 
     fn set_processing_resolution(&mut self, target_height: i32) {
@@ -1507,13 +1592,10 @@ impl Controller {
         }
     }
 
-    fn set_output_size(&self, w: usize, h: usize) {
-        if self.stabilizer.set_output_size(w, h) {
-            self.stabilizer.recompute_undistortion();
-            self.request_recompute();
-        }
-        // Propagate to the display viewport so it recreates its output texture.
-        qrhi_undistort::set_viewport_output_size(self.viewport_ptr.load(SeqCst), w as u32, h as u32);
+    fn set_output_size(&mut self, w: usize, h: usize) {
+        self.export_output_w = w;
+        self.export_output_h = h;
+        self.recompute_preview_output_size();
     }
 
     wrap_simple_method!(override_video_fps,         v: f64, r: bool; recompute; update_offset_model);

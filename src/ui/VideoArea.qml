@@ -881,7 +881,12 @@ Item {
                 Item {
                     id: gyroflowViewportContainer;
                     anchors.fill: vid;
-                    Component.onCompleted: controller.init_viewport(this);
+                    Component.onCompleted: {
+                        controller.init_viewport(this);
+                        controller.set_viewport_display_size(width, height);
+                    }
+                    onWidthChanged:  controller.set_viewport_display_size(width, height);
+                    onHeightChanged: controller.set_viewport_display_size(width, height);
                 }
 
                 GridGuide {

@@ -568,6 +568,16 @@ public:
             m_initialUpdates = nullptr;
         }
 
+        // Get actual viewport texture size from the render target (used for setViewport only).
+        // KernelParams output_width/height stay at export dimensions — addDistortion needs
+        // them as the calibration basis, and overlay pixel coordinates are defined in that space.
+        QSize vpSize = m_outputSize;
+        {
+            const QRhiColorAttachment *att = m_externalRT->description().colorAttachmentAt(0);
+            if (att && att->texture())
+                vpSize = att->texture()->pixelSize();
+        }
+
         u->updateDynamicBuffer(m_kernelParams.get(), 0, paramsLen, params);
 
         {
@@ -591,7 +601,7 @@ public:
         // No intermediate texture, no copyTexture — MDK is done after this.
         cb->beginPass(m_externalRT, QColor(Qt::black), { 1.0f, 0 }, u);
         cb->setGraphicsPipeline(m_pipeline.get());
-        cb->setViewport({ 0, 0, float(m_outputSize.width()), float(m_outputSize.height()) });
+        cb->setViewport({ 0, 0, float(vpSize.width()), float(vpSize.height()) });
         cb->setShaderResources();
         QRhiCommandBuffer::VertexInput vbufBinding(m_vertexBuffer.get(), 0);
         cb->setVertexInput(0, 1, &vbufBinding, m_indexBuffer.get(), 0, QRhiCommandBuffer::IndexUInt16);

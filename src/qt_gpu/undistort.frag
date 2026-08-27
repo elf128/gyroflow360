@@ -280,12 +280,13 @@ vec2 addDistortion(vec2 pos, float correctionAmount, vec2 focalLength, float fov
 
 void main()
 {
-    const vec2 outSize = vec2( params.output_width, params.output_height) ;
+    // outSize is the export/stab output dimensions. Used as the coordinate basis for
+    // addDistortion and overlay pixel coordinates (draw_pixel / draw_safe_area).
+    const vec2 outSize = vec2(params.output_width, params.output_height);
 
-    vec2 texPos = v_texcoord.xy * outSize + params.translation2d;
+    // Work in centered proportional space: (0,0) = frame center, ±0.5 = edges.
+    vec2 texPos = v_texcoord.xy - 0.5 + params.translation2d;
     vec2 outPos = v_texcoord.xy * outSize;
-
-    vec2 pos = v_texcoord.xy * 2.0.xx - 1.0.xx;
 
     //fragColor = vec4( outPos, 0.0f, 1.0f );
 
@@ -304,7 +305,8 @@ void main()
     if ( params.lens_correction_amount < 1.0 )
     {
         vec2 center = outSize * 0.5;
-        vec2 norm = (texPos - center) / center;
+        // texPos in [-0.5, 0.5]; convert to [-1, 1] for addDistortion, then back.
+        vec2 norm = texPos * 2.0;
         norm = addDistortion(
             norm,
             params.lens_correction_amount,
@@ -313,22 +315,22 @@ void main()
             bool( params.flags & 2 ),
             params.light_refraction_coefficient
         );
-        texPos = norm * center + center;
+        texPos = norm * 0.5;
     }
 
     ///////////////////////////////////////////////////////////////////
 
     ///////////////////////////////////////////////////////////////////
-    // Calculate source `y` for rolling shutter
-    float sy = texPos.y;
-
+    // Calculate source `y` for rolling shutter.
+    // texPos is in centered proportional space [-0.5, 0.5]; map to matrix index.
+    float sy;
     if (bool(params.flags & 16))
     { // Horizontal RS
-        sy = min(params.width, max(0, floor(0.5 + texPos.x)));
+        sy = (texPos.x + 0.5) * float(params.matrix_count - 1);
     }
     else
     {
-        sy = min(params.height, max(0, floor(0.5 + texPos.y)));
+        sy = (texPos.y + 0.5) * float(params.matrix_count - 1);
     }
 
     if (params.matrix_count > 1)
@@ -338,19 +340,19 @@ void main()
         if (uv.x > -99998.0)
         {
             if (bool(params.flags & 16))
-            { // Horizontal RS
-                sy = min(params.width, max(0, floor(0.5 + uv.x)));
+            { // Horizontal RS — uv in input pixel space
+                sy = (uv.x / float(params.width))  * float(params.matrix_count - 1);
             }
             else
             {
-                sy = min(params.height, max(0, floor(0.5 + uv.y)));
+                sy = (uv.y / float(params.height)) * float(params.matrix_count - 1);
             }
         }
     }
 
     ///////////////////////////////////////////////////////////////////
 
-    float idx = min(sy, params.matrix_count - 1.0);
+    float idx = clamp(sy, 0.0, params.matrix_count - 1.0);
 
     vec2 uv = rotate_and_distort(texPos, idx);
     vec2 frame_size = vec2(params.width, params.height);

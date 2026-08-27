@@ -53,11 +53,13 @@ Rectangle {
             lensProfileHr.parent = inputsTab.inner;
             motionData   .parent = inputsTab.inner;
 
-            sync    .parent = paramsTab.inner;
-            syncHr  .parent = paramsTab.inner;
-            stab    .parent = paramsTab.inner;
-            stabHr  .parent = paramsTab.inner;
-            advanced.parent = paramsTab.inner;
+            sync         .parent = paramsTab.inner;
+            syncHr       .parent = paramsTab.inner;
+            stab         .parent = paramsTab.inner;
+            stabHr       .parent = paramsTab.inner;
+            viewSettings .parent = paramsTab.inner;
+            viewSettingsHr.parent = paramsTab.inner;
+            advanced     .parent = paramsTab.inner;
             advancedHr.parent = paramsTab.inner;
             nlePlugins.parent = paramsTab.inner;
 
@@ -75,6 +77,8 @@ Rectangle {
             syncHr        .parent = rightPanel.col;
             stab          .parent = rightPanel.col;
             stabHr        .parent = rightPanel.col;
+            viewSettings  .parent = rightPanel.col;
+            viewSettingsHr.parent = rightPanel.col;
             exportSettings.parent = rightPanel.col;
             exportHr      .parent = rightPanel.col;
             advanced      .parent = rightPanel.col;
@@ -93,6 +97,7 @@ Rectangle {
     property alias sync: sync.item;
     property alias stab: stab.item;
     property alias exportSettings: exportSettings.item;
+    property alias viewSettings: viewSettings.item;
     property alias advanced: advanced.item;
     property alias renderBtn: renderBtn;
 
@@ -509,6 +514,8 @@ Rectangle {
             Hr { id: syncHr; }
             ItemLoader { id: stab; sourceComponent: Component { Menu.Stabilization { } } }
             Hr { id: stabHr; }
+            ItemLoader { id: viewSettings; sourceComponent: Component { Menu.ViewSettings { } } }
+            Hr { id: viewSettingsHr; }
             ItemLoader { id: exportSettings; sourceComponent: Component { Menu.Export { showBtn: !window.isMobileLayout; } } }
             Hr { id: exportHr; visible: !isMobileLayout; }
             ItemLoader { id: advanced; sourceComponent: Component { Menu.Advanced { } } }
@@ -611,6 +618,9 @@ Rectangle {
         }
         function onRequest_recompute(): void {
             Qt.callLater(controller.recompute_threaded);
+        }
+        function onRequest_redraw(): void {
+            Qt.callLater(() => { if (videoArea && videoArea.vid) videoArea.vid.forceRedraw(); });
         }
         function openUpdatePage(): void {
             if (Qt.platform.os == "android") {

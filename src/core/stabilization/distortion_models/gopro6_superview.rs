@@ -73,14 +73,9 @@ impl GoPro6Superview {
             return uv;
         }
 
+        // uv in proportional [-0.5, 0.5] space; superview works in that same domain.
         float2 digital_undistort_point(float2 uv, __global KernelParams *params) {
-            float2 out_c2 = (float2)(params->output_width, params->output_height);
-            uv = (uv / out_c2) - 0.5f;
-
-            uv = superview(uv);
-
-            uv = (uv + 0.5f) * out_c2;
-            return uv;
+            return superview(uv);
         }
         float2 digital_distort_point(float2 uv, __global KernelParams *params) {
             float2 size = (float2)(params->width, params->height);

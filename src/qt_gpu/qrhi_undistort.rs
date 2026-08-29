@@ -153,3 +153,41 @@ pub fn set_viewport_output_size(vp_ptr: usize, w: u32, h: u32) {
         if (viewport) viewport->setOutputSize(QSize(w, h));
     });
 }
+
+/// Current allocated size of the viewport's output texture, as (width, height).
+/// Returns (0, 0) if the viewport or its GPU resources aren't ready yet (before the
+/// first updatePaintNode has run) — callers should skip the frame in that case.
+/// Safe to call from the render thread (read-only access to render-thread-owned state).
+pub fn viewport_texture_size(vp_ptr: usize) -> (u32, u32) {
+    if vp_ptr == 0 { return (0, 0); }
+    let size = cpp!(unsafe [vp_ptr as "uintptr_t"] -> QSize as "QSize" {
+        auto *viewport = reinterpret_cast<GyroflowViewport *>(vp_ptr);
+        if (!viewport || !viewport->outputTexture()) return QSize(0, 0);
+        return viewport->outputTexture()->pixelSize();
+    });
+    (size.width, size.height)
+}
+
+/// Native GPU texture handle backing the viewport's output texture — same encoding as
+/// MDK's `nativeTexture().object` (GLuint for OpenGL, pointer bit-pattern for Metal/D3D11,
+/// VkImage handle for Vulkan). Returns 0 if not ready yet. Must be called on the render
+/// thread, after the RHI backend for the window has been established.
+pub fn viewport_native_texture(vp_ptr: usize) -> u64 {
+    if vp_ptr == 0 { return 0; }
+    cpp!(unsafe [vp_ptr as "uintptr_t"] -> u64 as "uint64_t" {
+        auto *viewport = reinterpret_cast<GyroflowViewport *>(vp_ptr);
+        if (!viewport || !viewport->outputTexture()) return 0;
+        return (uint64_t)viewport->outputTexture()->nativeTexture().object;
+    })
+}
+
+/// Schedule a repaint after writing into the viewport's texture via a native-texture-interop
+/// backend (bypassing the RHI render-pass mechanism, so Qt has no other way to know new
+/// content landed). Safe to call from the render thread.
+pub fn viewport_request_update(vp_ptr: usize) {
+    if vp_ptr == 0 { return; }
+    cpp!(unsafe [vp_ptr as "uintptr_t"] {
+        auto *viewport = reinterpret_cast<GyroflowViewport *>(vp_ptr);
+        if (viewport) viewport->update();
+    });
+}

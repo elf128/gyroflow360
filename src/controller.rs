@@ -1192,23 +1192,35 @@ impl Controller {
 
                 if preview_pipeline.load(SeqCst) > 1 { return false; }
 
-                let size = (width as usize, height as usize, width as usize * 4);
+                // Pipeline 1 ("Zero-copy OpenCL"/native texture interop): read MDK's decoded
+                // frame (ptr1, decode resolution) and write natively into the viewport's own
+                // texture (its own, independently-sized, resolution) — never back into MDK's
+                // texture in place. MDK is a headless decoder/texture source only from here on.
+                let vp = viewport_ptr.load(SeqCst);
+                if vp == 0 { return true; } // viewport not yet initialised
+                let (out_w, out_h) = qrhi_undistort::viewport_texture_size(vp);
+                if out_w < 4 || out_h < 4 { return true; } // viewport texture not ready yet
+                let out_native = qrhi_undistort::viewport_native_texture(vp);
+                if out_native == 0 { return true; }
+
+                let in_size  = (width as usize, height as usize, width as usize * 4);
+                let out_size = (out_w as usize, out_h as usize, out_w as usize * 4);
 
                 let mut buffers =
                     match backend_id {
                         1 => { // OpenGL, ptr1: texture, ptr2: opengl context
                             Some((Buffers {
                                 input: BufferDescription {
-                                    size,
+                                    size: in_size,
                                     data: BufferSource::OpenGL {
                                         texture: ptr1 as u32,
                                         context: ptr2 as *mut std::ffi::c_void
                                     }, ..Default::default()
                                 },
                                 output: BufferDescription {
-                                    size,
+                                    size: out_size,
                                     data: BufferSource::OpenGL {
-                                        texture: ptr1 as u32,
+                                        texture: out_native as u32,
                                         context: ptr2 as *mut std::ffi::c_void
                                     }, ..Default::default()
                                 },
@@ -1219,13 +1231,13 @@ impl Controller {
                         2 => { // Metal, ptr1: texture, ptr2: device, ptr3: command queue
                             Some((Buffers {
                                 input: BufferDescription {
-                                    size,
+                                    size: in_size,
                                     data: BufferSource::Metal { texture: ptr1 as *mut std::ffi::c_void, command_queue: ptr3 as *mut std::ffi::c_void }, ..Default::default()
                                 },
                                 output: BufferDescription {
-                                    size,
+                                    size: out_size,
                                     texture_copy: true,
-                                    data: BufferSource::Metal { texture: ptr1 as *mut std::ffi::c_void, command_queue: ptr3 as *mut std::ffi::c_void }, ..Default::default()
+                                    data: BufferSource::Metal { texture: out_native as *mut std::ffi::c_void, command_queue: ptr3 as *mut std::ffi::c_void }, ..Default::default()
                                 },
                             },
                             "Metal"))
@@ -1234,7 +1246,7 @@ impl Controller {
                         3 => { // D3D11, ptr1: texture, ptr2: device, ptr3: device context
                             Some((Buffers {
                                 input: BufferDescription {
-                                    size,
+                                    size: in_size,
                                     texture_copy: true,
                                     data: BufferSource::DirectX11 {
                                         texture: ptr1 as *mut std::ffi::c_void,
@@ -1243,10 +1255,10 @@ impl Controller {
                                     }, ..Default::default()
                                 },
                                 output: BufferDescription {
-                                    size,
+                                    size: out_size,
                                     texture_copy: true,
                                     data: BufferSource::DirectX11 {
-                                        texture: ptr1 as *mut std::ffi::c_void,
+                                        texture: out_native as *mut std::ffi::c_void,
                                         device:  ptr2 as *mut std::ffi::c_void,
                                         device_context: ptr3 as *mut std::ffi::c_void
                                     }, ..Default::default()
@@ -1258,15 +1270,15 @@ impl Controller {
                         4 => { // Vulkan, ptr1: VkImage, ptr2: VkDevice, ptr3: VkCommandBuffer, ptr4: VkPhysicalDevice, ptr5: VkInstance
                             Some((Buffers {
                                 input: BufferDescription {
-                                    size,
+                                    size: in_size,
                                     texture_copy: false,
                                     data: BufferSource::Vulkan { texture: ptr1, device: ptr2, physical_device: ptr4, instance: ptr5 },
                                     ..Default::default()
                                 },
                                 output: BufferDescription {
-                                    size,
+                                    size: out_size,
                                     texture_copy: true,
-                                    data: BufferSource::Vulkan { texture: ptr1, device: ptr2, physical_device: ptr4, instance: ptr5 },
+                                    data: BufferSource::Vulkan { texture: out_native, device: ptr2, physical_device: ptr4, instance: ptr5 },
                                     ..Default::default()
                                 },
                             },
@@ -1278,7 +1290,8 @@ impl Controller {
                 if let Some((ref mut buffers, backend)) = buffers {
                     match stab.process_pixels::<RGBA8>((timestamp_ms * 1000.0).round() as i64, Some(frame as usize), buffers) {
                         Ok(ret) =>  {
-                            update_info2((ret.fov, ret.minimal_fov, ret.focal_length, QString::from(format!("Processing {}x{} using {backend}->{} took {:.2}ms", width, height, ret.backend, _time.elapsed().as_micros() as f64 / 1000.0))));
+                            qrhi_undistort::viewport_request_update(vp);
+                            update_info2((ret.fov, ret.minimal_fov, ret.focal_length, QString::from(format!("Processing {}x{} -> {}x{} using {backend}->{} took {:.2}ms", width, height, out_w, out_h, ret.backend, _time.elapsed().as_micros() as f64 / 1000.0))));
                             return true;
                         },
                         Err(e) => {

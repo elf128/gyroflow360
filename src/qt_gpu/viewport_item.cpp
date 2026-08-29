@@ -72,6 +72,13 @@ public:
     QRhiTextureRenderTarget  *renderTarget()          const { return m_rt.get(); }
     QRhiRenderPassDescriptor *renderPassDescriptor()  const { return m_rtRp.get(); }
 
+    // The texture backing renderTarget(). Exposed so a native-texture-interop backend
+    // (pipeline 1, "Zero-copy OpenCL") can write into it directly, bypassing the RHI
+    // render-pass mechanism entirely. Same lifetime/thread rules as renderTarget().
+    // Caller must still call the inherited update() after writing, to schedule a repaint
+    // (safe to call from the render thread).
+    QRhiTexture *outputTexture() const { return m_tex.get(); }
+
 protected:
     QSGNode *updatePaintNode(QSGNode *old, UpdatePaintNodeData *) override {
         if (m_dirty && !m_outputSize.isEmpty()) {

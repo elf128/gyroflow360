@@ -617,25 +617,24 @@ fn undistort_coord(position: vec2<f32>) -> vec2<f32> {
             map_coord(position.y, f32(params.output_rect.y), f32(params.output_rect.y + params.output_rect.w), 0.0, f32(params.output_height))
         );
     }
-    out_pos += params.translation2d;
+    let out_dims = vec2<f32>(f32(params.output_width), f32(params.output_height));
+    out_pos = out_pos / out_dims - vec2<f32>(0.5, 0.5) + params.translation2d;
 
     ///////////////////////////////////////////////////////////////////
     // Add lens distortion back
     if (params.lens_correction_amount < 1.0) {
         let factor = max(1.0 - params.lens_correction_amount, 0.001); // FIXME: this is close but wrong
-        let out_c = vec2<f32>(f32(params.output_width) / 2.0, f32(params.output_height) / 2.0);
-        let out_f = (params.f / params.fov) / factor;
+        let out_f = (params.f / params.fov) / factor / out_dims; // proportional focal length; out_c = 0
 
         var new_out_pos = out_pos;
 
         if (bool(flags & 2)) { // Has digital lens
-            // Apply the digital warp in the UN-zoomed (fov=1) frame so it's FOV-independent.
-            new_out_pos = (new_out_pos - out_c) * params.fov + out_c;
-            new_out_pos = digital_undistort_point(new_out_pos);
-            new_out_pos = (new_out_pos - out_c) / params.fov + out_c;
+            // digital_undistort_point takes pixel coords; zoom in proportional is just *fov (center=0)
+            let zoom_px = new_out_pos * (out_dims * params.fov) + out_dims * 0.5;
+            new_out_pos = (digital_undistort_point(zoom_px) / out_dims - vec2<f32>(0.5, 0.5)) / params.fov;
         }
 
-        new_out_pos = (new_out_pos - out_c) / out_f;
+        new_out_pos = new_out_pos / out_f; // normalize to camera space (out_c = 0)
         new_out_pos = undistort_point(new_out_pos);
         if (bool(flags & 2048) && params.light_refraction_coefficient != 1.0 && params.light_refraction_coefficient > 0.0) {
             let r = length(new_out_pos);
@@ -645,7 +644,7 @@ fn undistort_coord(position: vec2<f32>) -> vec2<f32> {
                 new_out_pos *= r_d / r;
             }
         }
-        new_out_pos = out_f * new_out_pos + out_c;
+        new_out_pos = out_f * new_out_pos; // back to proportional (out_c = 0)
 
         out_pos = new_out_pos * (1.0 - params.lens_correction_amount) + (out_pos * params.lens_correction_amount);
     }
@@ -653,20 +652,17 @@ fn undistort_coord(position: vec2<f32>) -> vec2<f32> {
 
     ///////////////////////////////////////////////////////////////////
     // Calculate source `y` for rolling shutter
-    var sy = 0u;
-    if (bool(flags & 16)) { // Horizontal RS
-        sy = u32(min(params.width, max(0, i32(floor(0.5 + out_pos.x)))));
-    } else {
-        sy = u32(min(params.height, max(0, i32(floor(0.5 + out_pos.y)))));
-    }
+    let mc_f = f32(params.matrix_count - 1);
+    var sy_f = select((out_pos.y + 0.5) * mc_f, (out_pos.x + 0.5) * mc_f, bool(flags & 16u));
+    var sy = u32(clamp(sy_f, 0.0, mc_f));
     if (params.matrix_count > 1) {
         let idx: u32 = u32((params.matrix_count / 2) * 21); // Use middle matrix
         let uv = rotate_and_distort(out_pos, idx, params.f, params.c, params.k1, params.k2, params.k3);
         if (uv.x > -99998.0) {
             if (bool(flags & 16)) { // Horizontal RS
-                sy = u32(min(params.width, max(0, i32(floor(0.5 + uv.x)))));
+                sy = u32(clamp(uv.x / f32(params.width)  * mc_f, 0.0, mc_f));
             } else {
-                sy = u32(min(params.height, max(0, i32(floor(0.5 + uv.y)))));
+                sy = u32(clamp(uv.y / f32(params.height) * mc_f, 0.0, mc_f));
             }
         }
     }

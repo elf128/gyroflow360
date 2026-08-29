@@ -121,13 +121,11 @@ impl GoProWarp {
                 y * (d0 + d1 * y2 + d2 * y2 * y2 + x2 * (d3 + d4 * y2 + d5 * x2)) + (uv.y - y)
             );
         }
+        // uv in proportional [-0.5, 0.5] space; gopro_map works in that same domain.
         float2 digital_undistort_point(float2 uv, __global KernelParams *params) {
             float factor = params->digital_lens_params[3].z; if (factor == 0.0f) { factor = 1.0f; }
-            float2 out_c2 = (float2)(params->output_width, params->output_height);
-            uv = (uv / out_c2) - 0.5f;
             uv = gopro_map(uv, params);
             uv.x = uv.x / factor;
-            uv = (uv + 0.5f) * out_c2;
             return uv;
         }
         float2 digital_distort_point(float2 uv, __global KernelParams *params) {

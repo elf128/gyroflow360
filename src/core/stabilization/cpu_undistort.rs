@@ -419,29 +419,36 @@ impl Stabilization {
             )
         }
 
-        fn undistort_coord(mut out_pos: Vector2<f32>, params: &KernelParams, matrices: &[[f32; 21]], distortion_model: &DistortionModel, digital_lens: Option<&DistortionModel>, r_limit_sq: f32, mesh_data: &[f64], out_c: &Vector2<f32>, out_f: &Vector2<f32>) -> Option<Vector2<f32>> {
-            out_pos.x = map_coord(out_pos.x, params.output_rect[0] as f32, (params.output_rect[0] + params.output_rect[2]) as f32, 0.0, params.output_width  as f32);
-            out_pos.y = map_coord(out_pos.y, params.output_rect[1] as f32, (params.output_rect[1] + params.output_rect[3]) as f32, 0.0, params.output_height as f32);
-            out_pos.x += params.translation2d[0];
-            out_pos.y += params.translation2d[1];
+        fn undistort_coord(mut out_pos: Vector2<f32>, params: &KernelParams, matrices: &[[f32; 21]], distortion_model: &DistortionModel, digital_lens: Option<&DistortionModel>, r_limit_sq: f32, mesh_data: &[f64]) -> Option<Vector2<f32>> {
+            out_pos.x = map_coord(out_pos.x, params.output_rect[0] as f32, (params.output_rect[0] + params.output_rect[2]) as f32, 0.0, params.output_width  as f32) / params.output_width  as f32 - 0.5 + params.translation2d[0];
+            out_pos.y = map_coord(out_pos.y, params.output_rect[1] as f32, (params.output_rect[1] + params.output_rect[3]) as f32, 0.0, params.output_height as f32) / params.output_height as f32 - 0.5 + params.translation2d[1];
 
             ///////////////////////////////////////////////////////////////////
             // Add lens distortion back
             if params.lens_correction_amount < 1.0 {
+                let factor = (1.0_f32 - params.lens_correction_amount).max(0.001); // FIXME: this is close but wrong
+                let out_f = Vector2::new(
+                    params.f[0] / params.fov / factor / params.output_width  as f32,
+                    params.f[1] / params.fov / factor / params.output_height as f32,
+                );
                 let mut new_out_pos = out_pos;
 
-                if (params.flags & 2) == 2 { // Has digial lens
+                if (params.flags & 2) == 2 { // Has digital lens
                     if let Some(digital) = digital_lens {
-                        // Apply the digital warp in the UN-zoomed (fov=1) frame so it's FOV-independent,
-                        let uz = ((new_out_pos.x - out_c.x) * params.fov + out_c.x, (new_out_pos.y - out_c.y) * params.fov + out_c.y);
-                        if let Some(pt) = digital.undistort_point(uz, params) {
-                            new_out_pos.x = (pt.0 - out_c.x) / params.fov + out_c.x;
-                            new_out_pos.y = (pt.1 - out_c.y) / params.fov + out_c.y;
+                        // digital.undistort_point takes pixel coords; zoom in proportional is just *fov (center=0)
+                        let out_dims = (params.output_width as f32, params.output_height as f32);
+                        let zoom_px = (
+                            new_out_pos.x * out_dims.0 * params.fov + out_dims.0 * 0.5,
+                            new_out_pos.y * out_dims.1 * params.fov + out_dims.1 * 0.5,
+                        );
+                        if let Some(result_px) = digital.undistort_point(zoom_px, params) {
+                            new_out_pos.x = (result_px.0 / out_dims.0 - 0.5) / params.fov;
+                            new_out_pos.y = (result_px.1 / out_dims.1 - 0.5) / params.fov;
                         }
                     }
                 }
 
-                new_out_pos = (new_out_pos - out_c).component_div(out_f);
+                new_out_pos = new_out_pos.component_div(&out_f); // normalize to camera space (out_c = 0)
                 if let Some(pt) = distortion_model.undistort_point((new_out_pos.x, new_out_pos.y), params) {
                     new_out_pos.x = pt.0;
                     new_out_pos.y = pt.1;
@@ -455,7 +462,7 @@ impl Stabilization {
                         new_out_pos *= factor;
                     }
                 }
-                new_out_pos = (new_out_pos.component_mul(out_f)) + out_c;
+                new_out_pos = new_out_pos.component_mul(&out_f); // back to proportional (out_c = 0)
 
                 out_pos = new_out_pos * (1.0 - params.lens_correction_amount) + (out_pos * params.lens_correction_amount);
             }
@@ -463,18 +470,19 @@ impl Stabilization {
 
             ///////////////////////////////////////////////////////////////////
             // Calculate source `y` for rolling shutter
+            let mc_f = (params.matrix_count - 1) as f32;
             let mut sy = if (params.flags & 16) == 16 { // Horizontal RS
-                (out_pos.x.round() as i32).min(params.width).max(0) as usize
+                ((out_pos.x + 0.5) * mc_f).clamp(0.0, mc_f) as usize
             } else {
-                (out_pos.y.round() as i32).min(params.height).max(0) as usize
+                ((out_pos.y + 0.5) * mc_f).clamp(0.0, mc_f) as usize
             };
             if params.matrix_count > 1 {
                 let idx = params.matrix_count as usize / 2;
                 if let Some(pt) = Stabilization::rotate_and_distort((out_pos.x, out_pos.y), idx, params, matrices, distortion_model, digital_lens, r_limit_sq, mesh_data) {
                     if (params.flags & 16) == 16 { // Horizontal RS
-                        sy = (pt.0.round() as i32).min(params.width).max(0) as usize;
+                        sy = (pt.0 / params.width as f32 * mc_f).clamp(0.0, mc_f) as usize;
                     } else {
-                        sy = (pt.1.round() as i32).min(params.height).max(0) as usize;
+                        sy = (pt.1 / params.height as f32 * mc_f).clamp(0.0, mc_f) as usize;
                     }
                 }
             }
@@ -524,10 +532,6 @@ impl Stabilization {
                 let bg = Vector4::<f32>::new(params.background[0], params.background[1], params.background[2], params.background[3]) * params.max_pixel_value;
                 let bg_t: T = PixelType::from_float(bg);
 
-                let factor = (1.0 - params.lens_correction_amount).max(0.001); // FIXME: this is close but wrong
-                let out_c = Vector2::new(params.output_width as f32 / 2.0, params.output_height as f32 / 2.0);
-                let out_f = Vector2::new(params.f[0] / params.fov / factor, params.f[1] / params.fov / factor);
-
                 // let drawing_enabled = !drawing.is_empty() && (params.flags & 8) == 8;
                 let fill_bg = (params.flags & 4) == 4;
                 let fix_range = (params.flags & 1) == 1;
@@ -563,12 +567,12 @@ impl Stabilization {
 
                             let position = Vector2::new(x as f32, y as f32);
 
-                            if let Some(mut uv) = undistort_coord(position, params, matrices, distortion_model, digital_lens, r_limit_sq, &mesh_data, &out_c, &out_f) {
+                            if let Some(mut uv) = undistort_coord(position, params, matrices, distortion_model, digital_lens, r_limit_sq, &mesh_data) {
                                 let mut jac = Vector4::new(1.0, 0.0, 0.0, 1.0);
                                 if I > 8 {
                                     let eps = 0.01;
-                                    let xyx = undistort_coord(position + Vector2::new(eps, 0.0), params, matrices, distortion_model, digital_lens, r_limit_sq, &mesh_data, &out_c, &out_f).unwrap_or_default() - uv;
-                                    let xyy = undistort_coord(position + Vector2::new(0.0, eps), params, matrices, distortion_model, digital_lens, r_limit_sq, &mesh_data, &out_c, &out_f).unwrap_or_default() - uv;
+                                    let xyx = undistort_coord(position + Vector2::new(eps, 0.0), params, matrices, distortion_model, digital_lens, r_limit_sq, &mesh_data).unwrap_or_default() - uv;
+                                    let xyy = undistort_coord(position + Vector2::new(0.0, eps), params, matrices, distortion_model, digital_lens, r_limit_sq, &mesh_data).unwrap_or_default() - uv;
                                     jac = Vector4::new(xyx.x / eps, xyy.x / eps, xyx.y / eps, xyy.y / eps);
                                 }
 

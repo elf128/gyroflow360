@@ -490,25 +490,37 @@ float2 rotate_and_distort(float2 pos, uint idx, __global KernelParams *params, _
 }
 
 float2 undistort_coord(float2 out_pos, __global KernelParams *params, __global const float *matrices, __global const float *mesh_data) {
-    out_pos.x = map_coord(out_pos.x, (float)params->output_rect.x, (float)(params->output_rect.x + params->output_rect.z), 0.0f, (float)params->output_width ) + params->translation2d.x;
-    out_pos.y = map_coord(out_pos.y, (float)params->output_rect.y, (float)(params->output_rect.y + params->output_rect.w), 0.0f, (float)params->output_height) + params->translation2d.y;
+    // UV-space from here on. output_rect is always the dispatch buffer's own rect (defaults to
+    // (0,0,dispatch_w,dispatch_h) in get_rect() when no explicit sub-rect is set) — using it
+    // instead of output_width/output_height drops the kernel's dependency on export resolution
+    // while still supporting an explicit sub-rect render target.
+    float2 rect_origin = (float2)((float)params->output_rect.x, (float)params->output_rect.y);
+    float2 rect_size   = (float2)((float)params->output_rect.z, (float)params->output_rect.w);
+    out_pos = (out_pos - rect_origin) / rect_size - 0.5f + params->translation2d;
 
     ///////////////////////////////////////////////////////////////////
-    // Add lens distortion back
+    // Add lens distortion back.
+    // params->f is the INPUT lens' calibrated focal length in input-pixel units — a fixed
+    // physical quantity, unrelated to whatever buffer we're rasterizing into right now. To
+    // turn the (dispatch-relative) proportional out_pos into the normalized ray
+    // undistort_point() expects, normalize by a FIXED reference frame instead: output_width/
+    // output_height, the export/K_out basis new_k was scaled against in frame_transform.rs.
+    // Using rect_size here (like out_pos's own construction above) would be wrong — it varies
+    // with viewport zoom (View/2, View/4, ...) and has nothing to do with how params->f was
+    // calibrated, causing the lens-correction blend to visibly shift with viewport size.
     if (params->lens_correction_amount < 1.0f) {
-        float2 factor = (float2)max(1.0f - params->lens_correction_amount, 0.001f); // FIXME: this is close but wrong
-        float2 out_c = (float2)(params->output_width / 2.0f, params->output_height / 2.0f);
-        float2 out_f = (params->f / params->fov) / factor;
+        float2 out_dims = (float2)((float)params->output_width, (float)params->output_height);
+        float f_factor = max(1.0f - params->lens_correction_amount, 0.001f); // FIXME: this is close but wrong
+        float2 out_f = (params->f / params->fov) / f_factor / out_dims; // proportional focal length; out_c = 0
 
         float2 new_out_pos = out_pos;
 
         if ((params->flags & 2)) { // Has digital lens
-            // Apply the digital warp in the UN-zoomed (fov=1) frame so it's FOV-independent
-            new_out_pos = (new_out_pos - out_c) * params->fov + out_c;
-            new_out_pos = digital_undistort_point(new_out_pos, params);
-            new_out_pos = (new_out_pos - out_c) / params->fov + out_c;
+            // digital_undistort_point operates directly in proportional [-0.5,0.5] space (center=0).
+            float2 zoom = new_out_pos * params->fov;
+            new_out_pos = digital_undistort_point(zoom, params) / params->fov;
         }
-        new_out_pos = (new_out_pos - out_c) / out_f;
+        new_out_pos = new_out_pos / out_f; // normalize to camera space (out_c = 0)
         new_out_pos = undistort_point(new_out_pos, params);
         if ((params->flags & 2048) && params->light_refraction_coefficient != 1.0f && params->light_refraction_coefficient > 0.0f) {
             float r = length(new_out_pos);
@@ -518,7 +530,7 @@ float2 undistort_coord(float2 out_pos, __global KernelParams *params, __global c
                 new_out_pos *= r_d / r;
             }
         }
-        new_out_pos = out_f * new_out_pos + out_c;
+        new_out_pos = out_f * new_out_pos; // back to proportional (out_c = 0)
 
         out_pos = new_out_pos * (1.0f - params->lens_correction_amount) + (out_pos * params->lens_correction_amount);
     }
@@ -526,20 +538,18 @@ float2 undistort_coord(float2 out_pos, __global KernelParams *params, __global c
 
     ///////////////////////////////////////////////////////////////////
     // Calculate source `y` for rolling shutter
-    int sy = 0;
-    if ((params->flags & 16)) { // Horizontal RS
-        sy = min((int)params->width, max(0, (int)round(out_pos.x)));
-    } else {
-        sy = min((int)params->height, max(0, (int)round(out_pos.y)));
-    }
+    float sy_f = (params->flags & 16)
+        ? (out_pos.x + 0.5f) * (float)(params->matrix_count - 1)
+        : (out_pos.y + 0.5f) * (float)(params->matrix_count - 1);
+    int sy = (int)clamp(sy_f, 0.0f, (float)(params->matrix_count - 1));
     if (params->matrix_count > 1) {
         int idx = (params->matrix_count / 2) * 21; // Use middle matrix
         float2 uv = rotate_and_distort(out_pos, idx, params, matrices, mesh_data);
         if (uv.x > -99998.0f) {
             if ((params->flags & 16)) { // Horizontal RS
-                sy = min((int)params->width, max(0, (int)round(uv.x)));
+                sy = (int)clamp(uv.x / (float)params->width  * (float)(params->matrix_count - 1), 0.0f, (float)(params->matrix_count - 1));
             } else {
-                sy = min((int)params->height, max(0, (int)round(uv.y)));
+                sy = (int)clamp(uv.y / (float)params->height * (float)(params->matrix_count - 1), 0.0f, (float)(params->matrix_count - 1));
             }
         }
     }

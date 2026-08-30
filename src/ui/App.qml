@@ -35,7 +35,7 @@ Rectangle {
             videoAreaCol.y = 0;
             videoAreaCol.x = 0;
             videoAreaCol.width = Qt.binding(() => window.width);
-            videoAreaCol.height = Qt.binding(() => window.height * (videoArea.fullScreen? 1 : (window.isMobileLayout? (window.videoArea.vid.loaded && window.videoArea.vid.height > window.videoArea.vid.width? 0.6 : 0.4) : 0.5)));
+            videoAreaCol.height = Qt.binding(() => window.height * (videoArea.fullScreen? 1 : (window.isMobileLayout? (controller.video_loaded && controller.video_height > controller.video_width? 0.6 : 0.4) : 0.5)));
             leftPanel.fixedWidth = Qt.binding(() => window.width * 0.4);
             rightPanel.fixedWidth = Qt.binding(() => window.width * (window.isMobileLayout? 1.0 : 0.6));
             leftPanel.y = Qt.binding(() => videoAreaCol.height);
@@ -101,7 +101,7 @@ Rectangle {
     property alias advanced: advanced.item;
     property alias renderBtn: renderBtn;
 
-    readonly property bool wasModified: window.videoArea.vid.loaded;
+    readonly property bool wasModified: controller.video_loaded;
     property bool isDialogOpened: false;
 
     FileDialog {
@@ -255,9 +255,9 @@ Rectangle {
                         property bool allowLens: false;
                         property bool allowSync: false;
                         onIsAddToQueueChanged: updateModel();
-                        enabled: window.videoArea.vid.loaded && outputFile.filename.length > 3;
+                        enabled: controller.video_loaded && outputFile.filename.length > 3;
 
-                        property bool enabled2: window.videoArea.vid.loaded && exportSettings.item && exportSettings.item.canExport && !videoArea.videoLoader.active;
+                        property bool enabled2: controller.video_loaded && exportSettings.item && exportSettings.item.canExport && !videoArea.videoLoader.active;
                         onEnabled2Changed: et.start();
                         Timer { id: et; interval: 200; onTriggered: renderBtn.btn.enabled = renderBtn.enabled2; }
 
@@ -364,7 +364,7 @@ Rectangle {
                                 ], undefined, Text.MarkdownText, "amd-bitrate-warning");
                             }
 
-                            videoArea.vid.grabToImage(function(result) {
+                            controller.grab_video_frame(function(b64) {
                                 if (isSandboxed && (!outputFile.folderUrl.toString() || !filesystem.can_create_file(outputFile.folderUrl, outputFile.filename))) {
                                     let el = messageBox(Modal.Info, qsTr("Due to file access restrictions, you need to select the destination folder manually.\nClick Ok and select the destination folder."), [
                                         { text: qsTr("Ok"), clicked: () => {
@@ -382,7 +382,7 @@ Rectangle {
                                     ], undefined, Text.AutoText, "keep-in-foreground");
                                 }
 
-                                const job_id = render_queue.add(window.getAdditionalProjectDataJson(), controller.image_to_b64(result.image));
+                                const job_id = render_queue.add(window.getAdditionalProjectDataJson(), b64);
                                 if (renderBtn.isAddToQueue || renderBtn.tempIsAddToQueue || render_queue.get_active_render_count() >= render_queue.parallel_renders) {
                                     // Add to queue
                                     renderBtn.addQueueDelayed = true;
@@ -401,13 +401,13 @@ Rectangle {
                                     render_queue.render_job(job_id);
                                 }
                                 renderBtn.tempIsAddToQueue = false;
-                            }, Qt.size(50 * dpiScale * videoArea.vid.parent.ratio, 50 * dpiScale));
+                            }, 50 * dpiScale * (controller.video_width / Math.max(1, controller.video_height)), 50 * dpiScale);
                         }
                         btn.onClicked: {
                             allowFile = false;
                             allowLens = false;
                             allowSync = false;
-                            window.videoArea.vid.pause();
+                            controller.pause_video();
                             render();
                         }
                         popup.onClicked: (index) => {
@@ -620,7 +620,7 @@ Rectangle {
             Qt.callLater(controller.recompute_threaded);
         }
         function onRequest_redraw(): void {
-            Qt.callLater(() => { if (videoArea && videoArea.vid) videoArea.vid.forceRedraw(); });
+            Qt.callLater(() => { if (videoArea) controller.force_video_redraw(); });
         }
         function openUpdatePage(): void {
             if (Qt.platform.os == "android") {
@@ -770,8 +770,8 @@ Rectangle {
             "output": exportSettings.item.getExportOptions(),
             "synchronization": sync.item.getSettings(),
 
-            "muted": window.videoArea.vid.muted,
-            "playback_speed": window.videoArea.vid.playbackRate
+            "muted": controller.video_muted,
+            "playback_speed": controller.video_playback_rate
         };
     }
     function getAdditionalProjectDataJson(): string { return JSON.stringify(getAdditionalProjectData()); }

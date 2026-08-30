@@ -121,11 +121,16 @@ Window {
     }
     function loadFile(file: url): void {
         lensCalib.infoList.rms = 0;
-        controller.reset_player(videoArea.vid);
+        // controller still resolves to the OLD calib_controller here; reset_video_source()
+        // destroys the MDKVideoItem it owns. ui_tools.init_calibrator() below unconditionally
+        // replaces the calib_controller context property with a fresh Controller, so `controller`
+        // resolves to the NEW instance by the time init_video_source() runs, creating a fresh
+        // item parented into the same persistent mdkSourceContainer.
+        controller.reset_video_source();
         Qt.callLater(() => {
             ui_tools.init_calibrator();
             Qt.callLater(() => {
-                controller.init_player(videoArea.vid);
+                controller.init_video_source(videoArea.mdkSourceContainer);
                 Qt.callLater(() => {
                     videoArea.loadFile(file);
                 });

@@ -9,7 +9,7 @@ MenuItem {
     id: sync;
     text: qsTr("Synchronization");
     iconName: "sync";
-    innerItem.enabled: window.videoArea.vid.loaded && !controller.sync_in_progress;
+    innerItem.enabled: controller.video_loaded && !controller.sync_in_progress;
     loader: controller.sync_in_progress;
     objectName: "synchronization";
 
@@ -114,8 +114,8 @@ MenuItem {
         return out;
     }
     function resolveSyncpointPattern(o: var): list<real> {
-        const duration = window.videoArea.vid.duration;
-        const fps      = window.videoArea.vid.frameRate;
+        const duration = controller.video_duration;
+        const fps      = controller.video_frame_rate;
 
         let timestamps = [];
         if (Array.isArray(o)) {
@@ -167,7 +167,7 @@ MenuItem {
                         const pos = start + (i*chunks);
                         ranges.push(pos);
                     }
-                    const duration = window.videoArea.vid.duration;
+                    const duration = controller.video_duration;
                     const filter_ranges = v => (v >= trimStart * duration) && (v <= trimEnd * duration);
                     if (sync.customSyncTimestamps.length > 0) {
                         ranges = sync.customSyncTimestamps.filter(filter_ranges).map(v => v / duration);

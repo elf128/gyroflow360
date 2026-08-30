@@ -12,29 +12,29 @@ Item {
     Shortcut {
         sequences: ["Space", "F3"];
         onActivated: {
-            if (videoArea.vid.playing) videoArea.vid.pause();
-            else                       videoArea.vid.play();
+            if (controller.video_playing) controller.pause_video();
+            else                       controller.play_video();
         }
     }
     // Previous frame
     Shortcut {
         sequences: ["Left", "Page Up", ",", "F2"];
-        onActivated:  videoArea.vid.seekToFrameDelta(-1);
+        onActivated:  controller.seek_to_frame_delta(-1);
     }
     // Previous 10 frames
     Shortcut {
         sequences: ["Ctrl+Left", "Ctrl+Page Up", "Ctrl+,", "F5"];
-        onActivated: videoArea.vid.seekToFrameDelta(-10);
+        onActivated: controller.seek_to_frame_delta(-10);
     }
     // Next frame
     Shortcut {
         sequences: ["Right", "Page Down", ".", "F4"];
-        onActivated: videoArea.vid.seekToFrameDelta(1);
+        onActivated: controller.seek_to_frame_delta(1);
     }
     // Next 10 frames
     Shortcut {
         sequences: ["Ctrl+Right", "Ctrl+Page Down", "Ctrl+.", "F6"];
-        onActivated: videoArea.vid.seekToFrameDelta(10);
+        onActivated: controller.seek_to_frame_delta(10);
     }
     // Go to trim start
     Shortcut {
@@ -42,7 +42,7 @@ Item {
         onActivated: {
             let closestRange = videoArea.timeline.closestTrimRange(videoArea.timeline.position, true);
             if (closestRange == -1) closestRange = 0;
-            videoArea.vid.currentFrame = videoArea.timeline.frameAtPosition(videoArea.timeline.getTrimRanges()[closestRange][0]) + 1;
+            controller.video_current_frame = videoArea.timeline.frameAtPosition(videoArea.timeline.getTrimRanges()[closestRange][0]) + 1;
         }
     }
     // Go to trim end
@@ -51,7 +51,7 @@ Item {
         onActivated: {
             let closestRange = videoArea.timeline.closestTrimRange(videoArea.timeline.position, false);
             if (closestRange == -1) closestRange = 0;
-            videoArea.vid.currentFrame = videoArea.timeline.frameAtPosition(videoArea.timeline.getTrimRanges()[closestRange][1]) - 1;
+            controller.video_current_frame = videoArea.timeline.frameAtPosition(videoArea.timeline.getTrimRanges()[closestRange][1]) - 1;
         }
     }
     // Set trim start here
@@ -90,7 +90,7 @@ Item {
     // Mute on/off
     Shortcut {
         sequence: "m";
-        onActivated: videoArea.vid.muted = !videoArea.vid.muted;
+        onActivated: controller.video_muted = !controller.video_muted;
     }
     // Stabilization on/off
     Shortcut {
@@ -254,19 +254,19 @@ Item {
         sequence: "J";
         property int currentX: 1;
         onActivated: {
-            //videoArea.vid.playbackRate = -1 * [1, 2, 4, 8, 16][currentX++ % 5];
-            videoArea.vid.seekToFrameDelta(-500);
-            videoArea.vid.play();
+            //controller.video_playback_rate = -1 * [1, 2, 4, 8, 16][currentX++ % 5];
+            controller.seek_to_frame_delta(-500);
+            controller.play_video();
         }
     }
     // Play/Pause + reset playback rate
     Shortcut {
         sequences: ["K"];
         onActivated: {
-            videoArea.vid.playbackRate = 1;
+            controller.video_playback_rate = 1;
             j.currentX = l.currentX = 0;
-            if (videoArea.vid.playing) videoArea.vid.pause();
-            else                       videoArea.vid.play();
+            if (controller.video_playing) controller.pause_video();
+            else                       controller.play_video();
         }
     }
     // Play forward
@@ -274,7 +274,7 @@ Item {
         id: l;
         sequence: "L";
         property int currentX: 1;
-        onActivated: { videoArea.vid.playbackRate = 1 * [1, 2, 4, 8, 16][currentX++ % 5]; videoArea.vid.play(); }
+        onActivated: { controller.video_playback_rate = 1 * [1, 2, 4, 8, 16][currentX++ % 5]; controller.play_video(); }
     }
 
     // Horizon lock roll adjustment shortcuts
@@ -309,13 +309,13 @@ Item {
         if (current_id > 0) {
             // Save
             window.renderBtn.isAddToQueue = true;
-            videoArea.vid.grabToImage(function(result) {
-                render_queue.add(window.getAdditionalProjectDataJson(), controller.image_to_b64(result.image));
+            controller.grab_video_frame(function(b64) {
+                render_queue.add(window.getAdditionalProjectDataJson(), b64);
                 if (new_id > 0) {
                     const data = render_queue.get_gyroflow_data(new_id);
                     videoArea.loadGyroflowData(JSON.parse(data), new_id);
                 }
-            });
+            }, 0, 0);
         }
     }
 

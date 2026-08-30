@@ -2,7 +2,6 @@
 // Copyright © 2021-2022 Adrian <adrian.eddy at gmail>
 
 import QtQuick
-import MDKVideo
 
 import "components/"
 import "menu/" as Menu
@@ -14,7 +13,7 @@ Item {
     height: parent.height;
     anchors.horizontalCenter: parent.horizontalCenter;
 
-    property alias vid: vid;
+    property alias mdkSourceContainer: mdkSourceContainer;
     property alias timeline: timeline;
     property alias durationMs: timeline.durationMs;
     property alias videoLoader: videoLoader;
@@ -49,7 +48,7 @@ Item {
     // matching YouTube-style 360 viewer convention). Coordinate space: X=right, Y=down, Z=forward.
     function rotateViewport360(dx_px, dy_px) {
         const SENSITIVITY = 0.25; // degrees per pixel
-        const ts = vid.timestamp;
+        const ts = controller.video_timestamp;
 
         // Read current look-at; default to straight-forward (0, 0, 1)
         const raw_x = controller.keyframe_value_at_video_timestamp("ViewportLookAtX", ts);
@@ -97,7 +96,7 @@ Item {
         controller.set_keyframe("ViewportLookAtX", 0, fx);
         controller.set_keyframe("ViewportLookAtY", 0, fy);
         controller.set_keyframe("ViewportLookAtZ", 0, fz);
-        vid.forceRedraw();
+        controller.force_video_redraw();
     }
 
     function loadGyroflowData(obj: var, queueJobId: var): void {
@@ -142,7 +141,7 @@ Item {
             console.log("Loading video file", urls[0]);
             loadFile(urls[0], false, +queueJobId);
             if (controller.image_sequence_fps > 0) {
-                vid.setFrameRate(controller.image_sequence_fps);
+                controller.set_video_frame_rate(controller.image_sequence_fps);
             }
             return;
         }
@@ -151,7 +150,7 @@ Item {
             root.pendingQueueJobId = +queueJobId;
             console.log("Loading gyro file", urls[1]);
             window.motionData.lastSelectedFile = urls[1];
-            controller.load_telemetry(urls[1], urls[0] == urls[1] || window.motionData.allMetadata, window.videoArea.vid, -1, project_version);
+            controller.load_telemetry(urls[1], urls[0] == urls[1] || window.motionData.allMetadata, -1, project_version);
             return;
         }
 
@@ -170,7 +169,7 @@ Item {
         target: controller;
         function onGyroflow_file_loaded(obj: var): void {
             if (obj) {
-                let duration_ms = videoArea.vid.duration;
+                let duration_ms = controller.video_duration;
                 const info = obj.video_info || { };
                 if (info && Object.keys(info).length > 0) {
                     if (info.hasOwnProperty("vfr_fps") && Math.round(+info.vfr_fps * 1000) != Math.round(+info.fps * 1000)) {
@@ -206,7 +205,7 @@ Item {
                     controller.image_sequence_start = +obj.image_sequence_start;
                 }
                 if (obj.hasOwnProperty("image_sequence_fps") && +obj.image_sequence_fps > 0.0) {
-                    vid.setFrameRate(+obj.image_sequence_fps);
+                    controller.set_video_frame_rate(+obj.image_sequence_fps);
                     controller.image_sequence_fps = +obj.image_sequence_fps;
                 }
                 if (obj.hasOwnProperty("playback_speed")) {
@@ -222,7 +221,7 @@ Item {
                     }
                 }
                 if (obj.hasOwnProperty("muted")) {
-                    videoArea.vid.muted = !!obj.muted;
+                    controller.video_muted = !!obj.muted;
                 }
             }
             controller.set_prevent_recompute(false);
@@ -348,7 +347,7 @@ Item {
         }
         function updateKeyframesView(): void {
             controller.update_keyframes_view(timeline.getKeyframesView());
-            controller.update_keyframe_values(vid.timestamp);
+            controller.update_keyframe_values(controller.video_timestamp);
         }
         function onKeyframes_changed(): void {
             Qt.callLater(updateKeyframesView);
@@ -377,6 +376,122 @@ Item {
         }
     }
     property Modal externalSdkModal: null;
+
+    // Video-source event handling. Declared at root level (not inside vidParent's subtree)
+    // because callers like stabEnabledBtn/fovOverviewBtn live in a sibling branch of the tree
+    // (the toolbar, not the video preview area) — bare calls only resolve via the ancestor
+    // scope chain, so these need to be reachable from anywhere in the file.
+    function fovChanged(): void {
+        const fov = controller.current_fov;
+        const focal_length = controller.current_focal_length;
+        const crop_factor = window.lensProfile?.cropFactor || 1.0;
+        // const ratio = controller.get_scaling_ratio(); // this shouldn't be called every frame because it locks the params mutex
+        currentFovText.text = qsTr("Zoom: %1").arg(fov > 0? (100 / fov).toFixed(2) + "%" : "---");
+
+        if (+focal_length > 0) {
+            const fl = +focal_length / fov;
+            currentFovText.text += "\n" + qsTr("Focal length: %1 mm").arg(fl.toFixed(2));
+            if (crop_factor && crop_factor != 1.0) {
+                currentFovText.text += " (" + qsTr("full frame equiv.: %1 mm").arg((fl * crop_factor).toFixed(2)) + ")";
+            }
+        }
+    }
+
+    function updateTurnSpeed(): void {
+        const turnSpeed = controller.get_turn_speed(controller.video_timestamp);
+        if (isNaN(turnSpeed)) {
+            turnSpeedValue.text = "---";
+        } else {
+            const xAngle = controller.get_x_angle(controller.video_timestamp);
+            turnSpeedValue.text = turnSpeed.toFixed(2) + "°/s (" + xAngle.toFixed(2) + "°)";
+        }
+    }
+
+    function fileLoaded(md: var): void {
+        videoLoader.active = false;
+        vidInfo.loader = false;
+        timeline.resetTrim();
+        timeline.resetZoom();
+
+        controller.video_file_loaded();
+        window.motionData.filename = "";
+
+        if (root.pendingGyroflowData) {
+            Qt.callLater(root.loadGyroflowData, root.pendingGyroflowData, root.pendingQueueJobId);
+        } else {
+            controller.load_telemetry(root.loadedFileUrl, true, -1, 0);
+        }
+        vidInfo.loadFromVideoMetadata(md, controller.video_width, controller.video_height);
+        window.sync.customSyncTimestamps = [];
+
+        if (root.mergedFiles.length > 1) {
+            if (controller.video_loaded) {
+                const copy = [...root.mergedFiles];
+                messageBox(Modal.Question, qsTr("Files merged successfully, do you want to delete the original ones?"), [
+                    { text: qsTr("Yes"), clicked: function() {
+                        for (const x of copy) {
+                            filesystem.move_to_trash(x);
+                        }
+                        return true;
+                    } },
+                    { text: qsTr("No"), accent: true },
+                ], null, undefined, "delete-after-join");
+            }
+            root.mergedFiles = [];
+        }
+
+        window.lensProfile.selected_manually = false;
+
+        // for (var i in md) console.info(i, md[i]);
+    }
+    property bool errorShown: false;
+    Timer {
+        id: bufferTrigger;
+        interval: 150;
+        onTriggered: {
+            if (!controller.video_width) bufferTrigger.start();
+            Qt.callLater(() => {
+                controller.video_current_frame++;
+                Qt.callLater(() => controller.video_current_frame = 0);
+                if (controller.video_width) {
+                    stabEnabledBtn.checked = true;
+                    controller.set_video_volume(volumeSlider.value / 100.0);
+                }
+            });
+        }
+    }
+    Connections {
+        target: controller;
+        function onVideo_current_frame_changed(): void {
+            fovChanged();
+            controller.update_keyframe_values(controller.video_timestamp);
+            window.motionData.orientationIndicator.updateOrientation(timeline.position * timeline.durationMs * 1000);
+            updateTurnSpeed();
+        }
+        function onVideo_metadata_loaded(md: var): void {
+            Qt.callLater(fileLoaded, md);
+        }
+        function onVideo_metadata_changed(): void {
+            if (controller.video_width > 0) {
+                // Trigger seek to buffer the video frames
+                if (controller.video_duration == 0) {
+                    controller.play_video();
+                    Qt.callLater(function() {
+                        stabEnabledBtn.checked = true;
+                        controller.set_video_volume(volumeSlider.value / 100.0);
+                    })
+                } else {
+                    bufferTrigger.start();
+                }
+            } else if (!errorShown) {
+                messageBox(Modal.Error, qsTr("Failed to load the selected file, it may be unsupported or invalid."), [ { "text": qsTr("Ok") } ]);
+                errorShown = true;
+                dropText.loadingFile = "";
+                root.pendingGyroflowData = null;
+                stabEnabledBtn.checked = true;
+            }
+        }
+    }
 
     function loadFile(url: url, skip_detection: bool, queueJobId: int): void {
         let filename = filesystem.get_filename(url);
@@ -450,7 +565,7 @@ Item {
                         settings.setValue("imageSequenceFps", fps);
                         controller.image_sequence_fps = fps;
                         loadFile(newUrl, true);
-                        vid.setFrameRate(fps);
+                        controller.set_video_frame_rate(fps);
                     } },
                     { text: qsTr("Cancel") },
                 ]);
@@ -483,13 +598,14 @@ Item {
         vidInfo.hasAccessToInputDirectory = folder.toString().length > 3;
 
         window.stab.fovSlider.value = 1.0;
-        vid.loaded = false;
+        // controller.load_video() below resets video_loaded itself, matching the eager reset
+        // this file used to do on `vid` directly, before video_loaded became a Controller-owned,
+        // Rust-driven property.
         videoLoader.active = true;
         vidInfo.loader = true;
-        //vid.url = url;
-        vid.errorShown = false;
+        errorShown = false;
         render_queue.editing_job_id = 0;
-        controller.load_video(url, vid);
+        controller.load_video(url);
         if (!isCalibrator) {
             const suffix = window.advanced.defaultSuffix.text;
             window.outputFile.setFilename(filesystem.filename_with_suffix(filename, suffix).replace(/%0[0-9]+d/, ""));
@@ -677,8 +793,8 @@ Item {
             spacing: 10 * dpiScale;
             Item {
                 id: vidParent;
-                readonly property real orgW: (stabEnabledBtn.checked && root.outWidth > 0? root.outWidth : (vid.videoWidth * window.lensProfile.input_horizontal_stretch));
-                readonly property real orgH: (stabEnabledBtn.checked && root.outHeight > 0? root.outHeight : (vid.videoHeight * window.lensProfile.input_vertical_stretch));
+                readonly property real orgW: (stabEnabledBtn.checked && root.outWidth > 0? root.outWidth : (controller.video_width * window.lensProfile.input_horizontal_stretch));
+                readonly property real orgH: (stabEnabledBtn.checked && root.outHeight > 0? root.outHeight : (controller.video_height * window.lensProfile.input_vertical_stretch));
                 readonly property real ratio: orgW / Math.max(1, orgH);
                 readonly property real w: vidParentParent.width  / parent.columns - (root.fullScreen? 0 : 20 * dpiScale);
                 readonly property real h: vidParentParent.height / parent.rows    - (root.fullScreen? 0 : 20 * dpiScale);
@@ -694,152 +810,35 @@ Item {
                     source: "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14'><rect fill='%23fff' x='0' y='0' width='7' height='7'/><rect fill='%23aaa' x='7' y='0' width='7' height='7'/><rect fill='%23aaa' x='0' y='7' width='7' height='7'/><rect fill='%23fff' x='7' y='7' width='7' height='7'/></svg>"
                 }*/
 
-                MDKVideo {
-                    id: vid;
-                    visible: opacity > 0;
-                    opacity: loaded? 1 : 0;
-                    Ease on opacity { }
+                // Headless decoder / texture source — never displayed directly, never declared
+                // in QML. controller.init_video_source() creates and owns the actual MDKVideoItem
+                // entirely from Rust (mirrors controller.init_viewport() below); this container
+                // only exists to give it somewhere in the window's item tree to be parented into.
+                // gyroflowViewportContainer (below) is the only thing ever shown; everywhere else
+                // in this file, state/control goes through controller.video_* instead of a `vid`
+                // reference, since QML no longer has (or needs) one.
+                Item {
+                    id: mdkSourceContainer;
                     anchors.fill: parent;
-                    property bool loaded: false;
-
-                    property bool stabEnabled: stabEnabledBtn.checked;
-                    transform: [
-                        Scale {
-                            readonly property real r: vidInfo.videoRotation * (Math.PI / 180);
-                            readonly property real rotW: Math.abs(vidParent.width * Math.cos(r)) + Math.abs(vidParent.height * Math.sin(r));
-                            readonly property real rotH: Math.abs(vidParent.width * Math.sin(r)) + Math.abs(vidParent.height * Math.cos(r));
-                            origin.x: vid.width / 2; origin.y: vid.height / 2;
-                            xScale: vid.stabEnabled? 1 : Math.min(vidParent.h / rotH, vidParent.w / rotW) * (fovOverviewBtn.checked? 0.5 : 1);
-                            yScale: xScale;
-                        },
-                        Rotation {
-                            origin.x: vid.width / 2; origin.y: vid.height / 2;
-                            angle: vid.stabEnabled? 0 : -vidInfo.videoRotation;
-                        }
-                    ]
-
-                    function fovChanged(): void {
-                        const fov = controller.current_fov;
-                        const focal_length = controller.current_focal_length;
-                        const crop_factor = window.lensProfile?.cropFactor || 1.0;
-                        // const ratio = controller.get_scaling_ratio(); // this shouldn't be called every frame because it locks the params mutex
-                        currentFovText.text = qsTr("Zoom: %1").arg(fov > 0? (100 / fov).toFixed(2) + "%" : "---");
-
-                        if (+focal_length > 0) {
-                            const fl = +focal_length / fov;
-                            currentFovText.text += "\n" + qsTr("Focal length: %1 mm").arg(fl.toFixed(2));
-                            if (crop_factor && crop_factor != 1.0) {
-                                currentFovText.text += " (" + qsTr("full frame equiv.: %1 mm").arg((fl * crop_factor).toFixed(2)) + ")";
-                            }
-                        }
-                    }
-
-                    function updateTurnSpeed(): void {
-                        const turnSpeed = controller.get_turn_speed(vid.timestamp);
-                        if (isNaN(turnSpeed)) {
-                            turnSpeedValue.text = "---";
-                        } else {
-                            const xAngle = controller.get_x_angle(vid.timestamp);
-                            turnSpeedValue.text = turnSpeed.toFixed(2) + "°/s (" + xAngle.toFixed(2) + "°)";
-                        }
-                    }
-
-                    onCurrentFrameChanged: {
-                        fovChanged();
-                        controller.update_keyframe_values(timestamp);
-                        window.motionData.orientationIndicator.updateOrientation(timeline.position * timeline.durationMs * 1000);
-                        updateTurnSpeed();
-                    }
-                    onMetadataLoaded: (md) => {
-                        Qt.callLater(fileLoaded, md);
-                    }
-                    function fileLoaded(md: var): void {
-                        loaded = vid.videoWidth > 0;
-                        videoLoader.active = false;
-                        vidInfo.loader = false;
-                        timeline.resetTrim();
-                        timeline.resetZoom();
-
-                        controller.video_file_loaded(vid);
-                        window.motionData.filename = "";
-
-                        if (root.pendingGyroflowData) {
-                            Qt.callLater(root.loadGyroflowData, root.pendingGyroflowData, root.pendingQueueJobId);
-                        } else {
-                            controller.load_telemetry(root.loadedFileUrl, true, vid, -1, 0);
-                        }
-                        vidInfo.loadFromVideoMetadata(md, vid.videoWidth, vid.videoHeight);
-                        window.sync.customSyncTimestamps = [];
-
-                        if (root.mergedFiles.length > 1) {
-                            if (loaded) {
-                                const copy = [...root.mergedFiles];
-                                messageBox(Modal.Question, qsTr("Files merged successfully, do you want to delete the original ones?"), [
-                                    { text: qsTr("Yes"), clicked: function() {
-                                        for (const x of copy) {
-                                            filesystem.move_to_trash(x);
-                                        }
-                                        return true;
-                                    } },
-                                    { text: qsTr("No"), accent: true },
-                                ], null, undefined, "delete-after-join");
-                            }
-                            root.mergedFiles = [];
-                        }
-
-                        window.lensProfile.selected_manually = false;
-
-                        // for (var i in md) console.info(i, md[i]);
-                    }
-                    property bool errorShown: false;
-                    onMetadataChanged: {
-                        if (vid.videoWidth > 0) {
-                            // Trigger seek to buffer the video frames
-                            if (vid.duration == 0) {
-                                vid.play();
-                                Qt.callLater(function() {
-                                    stabEnabledBtn.checked = true;
-                                    vid.volume = volumeSlider.value / 100.0;
-                                })
-                            } else {
-                                bufferTrigger.start();
-                            }
-                        } else if (!errorShown) {
-                            messageBox(Modal.Error, qsTr("Failed to load the selected file, it may be unsupported or invalid."), [ { "text": qsTr("Ok") } ]);
-                            errorShown = true;
-                            dropText.loadingFile = "";
-                            root.pendingGyroflowData = null;
-                            stabEnabledBtn.checked = true;
-                        }
-                    }
-                    Timer {
-                        id: bufferTrigger;
-                        interval: 150;
-                        onTriggered: {
-                            if (!vid.videoWidth) bufferTrigger.start();
-                            Qt.callLater(() => {
-                                vid.currentFrame++;
-                                Qt.callLater(() => vid.currentFrame = 0);
-                                if (vid.videoWidth) {
-                                    stabEnabledBtn.checked = true;
-                                    vid.volume = volumeSlider.value / 100.0;
-                                }
-                            });
-                        }
-                    }
-
-                    backgroundColor: "#111111";
                     Component.onCompleted: {
-                        controller.init_player(this);
+                        controller.init_video_source(this);
+                        controller.set_background_color("#111111");
                     }
-                    Rectangle {
-                        border.color: styleVideoBorderColor;
-                        border.width: 1 * dpiScale;
-                        color: "transparent";
-                        radius: 5 * dpiScale;
-                        anchors.fill: parent;
-                        anchors.margins: -border.width;
-                    }
+                }
+
+                // NOTE: the raw/unstabilized preview (stabEnabledBtn unchecked) that used to be
+                // produced by transforming vid directly is not currently reproduced — the shader
+                // pipeline has no pass-through mode yet. See Big Picture notes: this needs to
+                // become part of the stabilization pass itself, not a QML-side transform on a
+                // raw decoder texture that no longer exists.
+
+                Rectangle {
+                    border.color: styleVideoBorderColor;
+                    border.width: 1 * dpiScale;
+                    color: "transparent";
+                    radius: 5 * dpiScale;
+                    anchors.fill: parent;
+                    anchors.margins: -border.width;
                 }
 
                 TapHandler {
@@ -850,7 +849,7 @@ Item {
                 DragHandler {
                     id: viewportDragHandler;
                     target: null; // prevents the handler from physically moving vidParent
-                    enabled: root.is360Camera && vid.loaded;
+                    enabled: root.is360Camera && controller.video_loaded;
                     cursorShape: active ? Qt.ClosedHandCursor : Qt.OpenHandCursor;
 
                     property real prevX: 0;
@@ -874,13 +873,11 @@ Item {
                         }
                     }
                 }
-                // Viewport display: the shader writes here; MDK never owns this texture.
-                // Declared after MDKVideo so QSG renders MDKVideo first (firing processTexture),
-                // then renders this item (displaying the shader output). GridGuide is declared
-                // after this so it composites on top as an overlay.
+                // Viewport display: the shader writes here. GridGuide is declared after this
+                // so it composites on top as an overlay.
                 Item {
                     id: gyroflowViewportContainer;
-                    anchors.fill: vid;
+                    anchors.fill: parent;
                     Component.onCompleted: {
                         controller.init_viewport(this);
                         controller.set_viewport_display_size(width, height);
@@ -891,8 +888,8 @@ Item {
 
                 GridGuide {
                     id: gridGuide;
-                    anchors.fill: vid;
-                    canShow: vid.loaded;
+                    anchors.fill: parent;
+                    canShow: controller.video_loaded;
                 }
             }
             Item {
@@ -904,7 +901,7 @@ Item {
                 readonly property real ratio: 1 + 1 / window.stab.fovSlider.value;
                 onRatioChanged: {
                     if (visible) {
-                        vid.forceRedraw();
+                        controller.force_video_redraw();
                         vidParent.widthChanged();
                     }
                 }
@@ -926,15 +923,15 @@ Item {
 
         Rectangle {
             id: dropRect;
-            border.width: vid.loaded? 0 : (3 * dpiScale);
+            border.width: controller.video_loaded? 0 : (3 * dpiScale);
             border.color: style === "light"? Qt.darker(styleBackground, 1.3) : Qt.lighter(styleBackground, 2);
             anchors.fill: parent;
-            anchors.margins: vid.loaded? 0 : (20 * dpiScale);
-            anchors.topMargin: vid.loaded? 0 : (50 * dpiScale);
-            anchors.bottomMargin: vid.loaded? 0 : (50 * dpiScale);
+            anchors.margins: controller.video_loaded? 0 : (20 * dpiScale);
+            anchors.topMargin: controller.video_loaded? 0 : (50 * dpiScale);
+            anchors.bottomMargin: controller.video_loaded? 0 : (50 * dpiScale);
             color: styleBackground;
             radius: 5 * dpiScale;
-            opacity: da.containsDrag? (vid.loaded? 0.8 : 0.3) : vid.loaded? 0 : 1.0;
+            opacity: da.containsDrag? (controller.video_loaded? 0.8 : 0.3) : controller.video_loaded? 0 : 1.0;
             Ease on opacity { duration: 300; }
             visible: opacity > 0;
             onVisibleChanged: if (!visible) dropText.loadingFile = "";
@@ -951,18 +948,18 @@ Item {
             ItemLoader {
                 anchors.fill: dropText;
                 anchors.margins: -30 * dpiScale;
-                visible: !dropText.loadingFile && !vid.loaded;
+                visible: !dropText.loadingFile && !controller.video_loaded;
                 scale: dropText.scale;
                 sourceComponent: Component { DropTargetRect { } }
             }
             ItemLoader {
                 anchors.fill: parent;
                 anchors.margins: 5 * dpiScale;
-                visible: !dropText.loadingFile && vid.loaded;
+                visible: !dropText.loadingFile && controller.video_loaded;
                 sourceComponent: Component { DropTargetRect { } }
             }
             MouseArea {
-                visible: !vid.loaded;
+                visible: !controller.video_loaded;
                 anchors.fill: parent;
                 cursorShape: Qt.PointingHandCursor;
                 onClicked: vidInfo.selectFileRequest();
@@ -1025,7 +1022,7 @@ Item {
             }
             Column {
                 id: textCol;
-                enabled: vid.loaded;
+                enabled: controller.video_loaded;
                 y: middleButtons.willFit? ((parent.height - height) / 2) : -buttonsArea.y - tlcol.y + 7 * dpiScale + ((main_window.safeAreaMargins.top || 0) * 0.8);
                 anchors.left: parent.left;
                 anchors.leftMargin: 10 * dpiScale;
@@ -1033,13 +1030,13 @@ Item {
                 property real widthPadded: Math.ceil(width / (20 * dpiScale)) * (20 * dpiScale);
                 Row {
                     BasicText {
-                        text: timeline.timeAtPosition((vid.currentFrame + 1) / Math.max(1, vid.frameCount));
+                        text: timeline.timeAtPosition((controller.video_current_frame + 1) / Math.max(1, controller.video_frame_count));
                         leftPadding: 0;
                         font.pixelSize: 14 * dpiScale;
                         anchors.verticalCenter: parent.verticalCenter;
                     }
                     BasicText {
-                        text: `(${vid.currentFrame+1}/${vid.frameCount})`;
+                        text: `(${controller.video_current_frame+1}/${controller.video_frame_count})`;
                         leftPadding: 5 * dpiScale;
                         font.pixelSize: 11 * dpiScale;
                         anchors.verticalCenter: parent.verticalCenter;
@@ -1078,7 +1075,7 @@ Item {
                 Row {
                     anchors.centerIn: parent;
                     spacing: 5 * dpiScale;
-                    enabled: vid.loaded;
+                    enabled: controller.video_loaded;
                     Button { text: "["; font.bold: true; onClicked: timeline.setTrimStart(timeline.closestTrimRange(timeline.position, true), timeline.position); tooltip: qsTr("Trim start"); transparentOnMobile: true; }
                     Button {
                         iconName: "chevron-left";
@@ -1090,17 +1087,17 @@ Item {
                                 if (mouse.modifiers & Qt.ShiftModifier) {
                                     timeline.jumpToPrevKeyframe("");
                                 } else if (mouse.modifiers & Qt.ControlModifier) {
-                                    vid.seekToFrameDelta(-10);
+                                    controller.seek_to_frame_delta(-10);
                                 } else {
-                                    vid.seekToFrameDelta(-1);
+                                    controller.seek_to_frame_delta(-1);
                                 }
                             }
                         }
                     }
                     Button {
-                        onClicked: { if (vid.playing) vid.pause(); else vid.play(); }
-                        tooltip: vid.playing? qsTr("Pause") : qsTr("Play");
-                        iconName: vid.playing? "pause" : "play";
+                        onClicked: { if (controller.video_playing) controller.pause_video(); else controller.play_video(); }
+                        tooltip: controller.video_playing? qsTr("Pause") : qsTr("Play");
+                        iconName: controller.video_playing? "pause" : "play";
                         transparentOnMobile: true;
                     }
                     Button {
@@ -1113,9 +1110,9 @@ Item {
                                 if (mouse.modifiers & Qt.ShiftModifier) {
                                     timeline.jumpToNextKeyframe("");
                                 } else if (mouse.modifiers & Qt.ControlModifier) {
-                                    vid.seekToFrameDelta(10);
+                                    controller.seek_to_frame_delta(10);
                                 } else {
-                                    vid.seekToFrameDelta(1);
+                                    controller.seek_to_frame_delta(1);
                                 }
                             }
                         }
@@ -1134,7 +1131,7 @@ Item {
             }
             Row {
                 id: rightButtons;
-                enabled: vid.loaded;
+                enabled: controller.video_loaded;
                 spacing: 5 * dpiScale;
                 y: middleButtons.willFit? ((parent.height - height) / 2) : -buttonsArea.y - tlcol.y + ((main_window.safeAreaMargins.top || 0) * 0.8);
                 onYChanged: root.additionalTopMargin = middleButtons.willFit? 0 : Math.max(height, textCol.height) + 2*4 * dpiScale + ((main_window.safeAreaMargins.top || 0) * 0.8);
@@ -1159,18 +1156,18 @@ Item {
                     id: fovOverviewBtn;
                     iconName: "fov-overview";
                     checked: false;
-                    onCheckedChanged: { controller.fov_overview = checked; vid.forceRedraw(); }
+                    onCheckedChanged: { controller.fov_overview = checked; controller.force_video_redraw(); }
                     tooltip: qsTr("Toggle stabilization overview");
                     TapHandler {
                         acceptedModifiers: Qt.ControlModifier
-                        onTapped: { if (fovOverviewBtn.checked) { secondPreview.show = !secondPreview.show; fovOverviewBtn.checked = false; vid.forceRedraw(); } }
+                        onTapped: { if (fovOverviewBtn.checked) { secondPreview.show = !secondPreview.show; fovOverviewBtn.checked = false; controller.force_video_redraw(); } }
                     }
                 }
 
                 SmallLinkButton {
                     id: stabEnabledBtn;
                     iconName: "gyroflow";
-                    onCheckedChanged: { controller.stab_enabled = checked; vid.forceRedraw(); vid.fovChanged(); }
+                    onCheckedChanged: { controller.stab_enabled = checked; controller.force_video_redraw(); fovChanged(); }
                     tooltip: qsTr("Toggle stabilization");
                 }
 
@@ -1178,14 +1175,14 @@ Item {
                     id: muteBtn;
                     iconName: checked? "sound" : "sound-mute";
                     tooltip: checked? qsTr("Mute") : qsTr("Unmute");
-                    checked: !vid.muted;
+                    checked: !controller.video_muted;
 
                     ContextMenuMouseArea {
                         underlyingItem: muteBtn;
                         cursorShape: Qt.PointingHandCursor;
-                        onContextMenu: (isHold, x, y) => { volumePopup.open(); if (isHold) vid.muted = !vid.muted; }
+                        onContextMenu: (isHold, x, y) => { volumePopup.open(); if (isHold) controller.video_muted = !controller.video_muted; }
                     }
-                    onClicked: () => { vid.muted = !vid.muted; }
+                    onClicked: () => { controller.video_muted = !controller.video_muted; }
                     Popup {
                         id: volumePopup;
                         width: volumeLabel.width + 25 * dpiScale;
@@ -1206,7 +1203,7 @@ Item {
                                 to: 100;
                                 value: settings.value("volume", 100);
                                 precision: 0;
-                                onValueChanged: { vid.volume = value / 100.0; settings.setValue("volume", value); }
+                                onValueChanged: { controller.set_video_volume(value / 100.0); settings.setValue("volume", value); }
                             }
                         }
                     }
@@ -1223,7 +1220,7 @@ Item {
                     anchors.verticalCenter: parent.verticalCenter;
                     onCurrentTextChanged: {
                         const rate = +currentText.replace("x", ""); // hacky but simple and it works
-                        vid.playbackRate = rate;
+                        controller.video_playback_rate = rate;
                     }
                     tooltip: qsTr("Playback speed");
                 }
@@ -1257,11 +1254,11 @@ Item {
             maxHeight: root.height - 50 * dpiScale;
             Timeline {
                 id: timeline;
-                durationMs: vid.duration;
-                scaledFps: vid.frameRate;
+                durationMs: controller.video_duration;
+                scaledFps: controller.video_frame_rate;
                 anchors.fill: parent;
                 fullScreen: root.fullScreen;
-                visible: vid.loaded || !window.isMobileLayout;
+                visible: controller.video_loaded || !window.isMobileLayout;
                 property bool prevRestrictTrim: false;
                 Component.onCompleted: prevRestrictTrim = restrictTrim;
 
@@ -1272,9 +1269,9 @@ Item {
                 onRestrictTrimChanged: {
                     if (restrictTrim) {
                         const ranges = timeline.getTrimRanges();
-                        vid.setPlaybackRange(ranges[0][0] * vid.duration, ranges[ranges.length - 1][1] * vid.duration);
+                        controller.set_video_playback_range(ranges[0][0] * controller.video_duration, ranges[ranges.length - 1][1] * controller.video_duration);
                     } else if (prevRestrictTrim != restrictTrim) {
-                        vid.setPlaybackRange(0, -1);
+                        controller.set_video_playback_range(0, -1);
                     }
                     prevRestrictTrim = restrictTrim;
                 }
@@ -1288,7 +1285,7 @@ Item {
             id: videoLoader;
             background: styleBackground;
             verticalOffset: window.isMobileLayout? -bottomPanel.height / 2 : 0;
-            onActiveChanged: { vid.forceRedraw(); vid.fovChanged(); }
+            onActiveChanged: { controller.force_video_redraw(); fovChanged(); }
             canHide: render_queue.main_job_id > 0;
             onCancel: {
                 if (render_queue.main_job_id > 0) {
@@ -1310,7 +1307,7 @@ Item {
             y: root.additionalTopMargin;
             InfoMessage {
                 type: InfoMessage.Warning;
-                visible: vid.loaded && !controller.lens_loaded && !isCalibrator;
+                visible: controller.video_loaded && !controller.lens_loaded && !isCalibrator;
                 text: qsTr("Lens profile is not loaded, the results will not look correct. Please load a lens profile for your camera.");
             }
         }

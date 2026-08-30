@@ -183,7 +183,7 @@ MenuItem {
     Button {
         id: autoCalibBtn;
         text: qsTr("Auto calibrate");
-        enabled: calibrator_window.videoArea.vid.loaded;
+        enabled: calibrator_window.controller.video_loaded;
         iconName: "spinner"
         anchors.horizontalCenter: parent.horizontalCenter;
         onClicked: {
@@ -284,7 +284,7 @@ MenuItem {
                 id: shutter;
                 defaultValue: 0.0;
                 from: 0.0;
-                to: 1000 / Math.max(1, calibrator_window.videoArea.vid.frameRate);
+                to: 1000 / Math.max(1, calibrator_window.controller.video_frame_rate);
                 width: parent.width;
                 unit: qsTr("ms");
                 precision: 2;
@@ -307,7 +307,7 @@ MenuItem {
         text: qsTr("Export lens profile");
         accent: true;
         iconName: "save"
-        enabled: infoList.rms > 0 && infoList.rms < 100 && calibrator_window.videoArea.vid.loaded;
+        enabled: infoList.rms > 0 && infoList.rms < 100 && calibrator_window.controller.video_loaded;
         anchors.horizontalCenter: parent.horizontalCenter;
         onClicked: {
             list.commitAll();
@@ -561,13 +561,13 @@ MenuItem {
                 onCurrentIndexChanged: {
                     let target_height = -1; // Full
                     switch (currentIndex) {
-                        case 0: calibrator_window.videoArea.vid.setProperty("scale", ""); break;
-                        case 1: target_height = 2160; calibrator_window.videoArea.vid.setProperty("scale", "3840x2160"); break;
-                        case 2: target_height = 1080; calibrator_window.videoArea.vid.setProperty("scale", "1920x1080"); break;
-                        case 3: target_height = 720;  calibrator_window.videoArea.vid.setProperty("scale", "1280x720");  break;
-                        case 4: target_height = 480;  calibrator_window.videoArea.vid.setProperty("scale", "640x480");   break;
+                        case 0: calibrator_window.controller.set_video_scale(""); break;
+                        case 1: target_height = 2160; calibrator_window.controller.set_video_scale("3840x2160"); break;
+                        case 2: target_height = 1080; calibrator_window.controller.set_video_scale("1920x1080"); break;
+                        case 3: target_height = 720;  calibrator_window.controller.set_video_scale("1280x720");  break;
+                        case 4: target_height = 480;  calibrator_window.controller.set_video_scale("640x480");   break;
                     }
-                    controller.set_preview_resolution(target_height, calibrator_window.videoArea.vid);
+                    controller.set_preview_resolution(target_height);
                 }
             }
         }

@@ -67,13 +67,13 @@ MenuItem {
             onCurrentIndexChanged: {
                 let target_height = -1; // Full
                 switch (currentIndex) {
-                    case 0: window.videoArea.vid.setProperty("scale", ""); break;
-                    case 1: target_height = 2160; window.videoArea.vid.setProperty("scale", "3840x2160"); break;
-                    case 2: target_height = 1080; window.videoArea.vid.setProperty("scale", "1920x1080"); break;
-                    case 3: target_height = 720;  window.videoArea.vid.setProperty("scale", "1280x720");  break;
-                    case 4: target_height = 480;  window.videoArea.vid.setProperty("scale", "640x480");   break;
+                    case 0: controller.set_video_scale(""); break;
+                    case 1: target_height = 2160; controller.set_video_scale("3840x2160"); break;
+                    case 2: target_height = 1080; controller.set_video_scale("1920x1080"); break;
+                    case 3: target_height = 720;  controller.set_video_scale("1280x720");  break;
+                    case 4: target_height = 480;  controller.set_video_scale("640x480");   break;
                 }
-                controller.set_preview_resolution(target_height, window.videoArea.vid);
+                controller.set_preview_resolution(target_height);
                 settings.setValue("previewResolution", currentIndex);
             }
         }
@@ -160,7 +160,7 @@ MenuItem {
             id: renderBackground;
             text: "#111111";
             width: parent.width;
-            onTextChanged: controller.set_background_color(text, window.videoArea.vid);
+            onTextChanged: controller.set_background_color(text);
         }
     }
     Label {
@@ -343,7 +343,7 @@ MenuItem {
                 }
                 controller.set_preview_pipeline(currentIndex);
                 Qt.callLater(processingDevice.updateController);
-                Qt.callLater(window.videoArea.vid.forceRedraw);
+                Qt.callLater(controller.force_video_redraw);
             }
             Component.onCompleted: Qt.callLater(currentIndexChanged);
         }

@@ -452,7 +452,7 @@ MenuItem {
             anchors.horizontalCenter: parent.horizontalCenter;
             text: qsTr("Export STMap");
             OutputPathField { id: opf; visible: false; }
-            enabled: window.videoArea.vid.loaded;
+            enabled: controller.video_loaded;
             onClicked: {
                 opf.selectFolder("", function(folder_url) {
                     if (controller.has_per_frame_lens_data()) {

@@ -9,7 +9,7 @@ MenuItem {
     id: root;
     text: qsTr("Stabilization");
     iconName: "gyroflow";
-    innerItem.enabled: window.videoArea.vid.loaded;
+    innerItem.enabled: controller.video_loaded;
     objectName: "stabilization";
 
     property alias horizonCb: horizonCb;
@@ -787,7 +787,7 @@ MenuItem {
                 scaler: 100.0;
                 property bool isKeyframed: false;
                 function updateVideoSpeed(): void {
-                    window.videoArea.vid.playbackRate = videoSpeed.value;
+                    controller.video_playback_rate = videoSpeed.value;
                     controller.set_video_speed(videoSpeed.value, videoSpeedAffectsSmoothing.checked, videoSpeedAffectsZooming.checked, videoSpeedAffectsZoomingLimit.checked);
                     isKeyframed = controller.is_keyframed("VideoSpeed");
                 }
@@ -803,8 +803,8 @@ MenuItem {
                     target: controller;
                     function onKeyframe_value_updated(keyframe: string, value: real): void {
                         if (keyframe == "VideoSpeed") {
-                            if (Math.abs(window.videoArea.vid.playbackRate - value) > 0.005) {
-                                window.videoArea.vid.playbackRate = value;
+                            if (Math.abs(controller.video_playback_rate - value) > 0.005) {
+                                controller.video_playback_rate = value;
                             }
                         }
                     }

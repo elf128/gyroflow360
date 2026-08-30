@@ -49,11 +49,11 @@ struct CalibrationItem {
 pub struct Controller {
     base: qt_base_class!(trait QObject),
 
-    init_player: qt_method!(fn(&self, player: QJSValue)),
-    reset_player: qt_method!(fn(&self, player: QJSValue)),
-    load_video: qt_method!(fn(&self, url: QUrl, player: QJSValue)),
-    video_file_loaded: qt_method!(fn(&self, player: QJSValue)),
-    load_telemetry: qt_method!(fn(&self, url: QUrl, is_video: bool, player: QJSValue, sample_index: i32, project_version: u32)),
+    init_video_source: qt_method!(fn(&mut self, container: QJSValue)),
+    reset_video_source: qt_method!(fn(&mut self)),
+    load_video: qt_method!(fn(&self, url: QUrl)),
+    video_file_loaded: qt_method!(fn(&mut self)),
+    load_telemetry: qt_method!(fn(&mut self, url: QUrl, is_video: bool, sample_index: i32, project_version: u32)),
     load_lens_profile: qt_method!(fn(&mut self, url_or_id: QString)),
     get_preset_contents: qt_method!(fn(&mut self, url_or_id: QString) -> QString),
     export_lens_profile: qt_method!(fn(&mut self, url: QUrl, info: QJsonObject, upload: bool)),
@@ -84,9 +84,9 @@ pub struct Controller {
     get_x_angle: qt_method!(fn(&self, timestamp_ms: f64) -> f64),
     set_use_gravity_vectors: qt_method!(fn(&self, v: bool)),
     set_horizon_lock_integration_method: qt_method!(fn(&self, v: i32)),
-    set_preview_resolution: qt_method!(fn(&mut self, target_height: i32, player: QJSValue)),
+    set_preview_resolution: qt_method!(fn(&mut self, target_height: i32)),
     set_processing_resolution: qt_method!(fn(&mut self, target_height: i32)),
-    set_background_color: qt_method!(fn(&self, color: QString, player: QJSValue)),
+    set_background_color: qt_method!(fn(&self, color: QString)),
     set_integration_method: qt_method!(fn(&self, index: usize)),
 
     set_offset: qt_method!(fn(&self, timestamp_us: i64, offset_ms: f64)),
@@ -336,6 +336,65 @@ pub struct Controller {
     dual_lens_file_changed: qt_signal!(path: QString),
     open_dual_lens_file: qt_method!(fn(&mut self, url: QString)),
     secondary_source_state: Arc<std::sync::Mutex<(String, Option<crate::rendering::secondary_source::SecondaryVideoSource>)>>,
+
+    // ---------------------------------------------------------------------
+    // Video source (headless MDK decoder). Created and owned by Controller —
+    // see init_video_source() — never declared or touched directly in QML.
+    // Raw pointer to the underlying MDKVideoItem's QQuickItem, same pattern as
+    // viewport_ptr. Every property below mirrors one on MDKVideoItem; writes and
+    // method calls forward to it, and its own signals are connected (in
+    // init_video_source) to re-emit the matching signal here.
+    // ---------------------------------------------------------------------
+    vid_ptr: Arc<AtomicUsize>,
+
+    video_loaded:         qt_property!(bool; NOTIFY video_loaded_changed),
+    video_loaded_changed: qt_signal!(),
+
+    video_timestamp:         qt_property!(f64; NOTIFY video_timestamp_changed),
+    video_timestamp_changed: qt_signal!(),
+
+    video_current_frame:         qt_property!(i64; WRITE set_video_current_frame NOTIFY video_current_frame_changed),
+    video_current_frame_changed: qt_signal!(),
+
+    video_duration:    qt_property!(f64; NOTIFY video_metadata_changed),
+    video_frame_rate:  qt_property!(f64; NOTIFY video_metadata_changed),
+    video_frame_count: qt_property!(i64; NOTIFY video_metadata_changed),
+    video_width:       qt_property!(u32; NOTIFY video_metadata_changed),
+    video_height:      qt_property!(u32; NOTIFY video_metadata_changed),
+    video_metadata_changed: qt_signal!(),
+    video_metadata_loaded:  qt_signal!(md: QJsonObject),
+
+    video_playing:         qt_property!(bool; NOTIFY video_playing_changed),
+    video_playing_changed: qt_signal!(),
+
+    video_muted:         qt_property!(bool; WRITE set_video_muted NOTIFY video_muted_changed),
+    video_muted_changed: qt_signal!(),
+
+    video_playback_rate:         qt_property!(f32; WRITE set_video_playback_rate NOTIFY video_playback_rate_changed),
+    video_playback_rate_changed: qt_signal!(),
+
+    set_video_volume:        qt_method!(fn(&self, v: f32)),
+    play_video:               qt_method!(fn(&self)),
+    pause_video:              qt_method!(fn(&self)),
+    seek_to_frame:            qt_method!(fn(&self, frame: i64, exact: bool)),
+    seek_to_frame_delta:      qt_method!(fn(&self, delta: i64)),
+    set_video_timestamp:      qt_method!(fn(&self, ms: f64)),
+    set_video_frame_rate:     qt_method!(fn(&self, fps: f64)),
+    set_video_playback_range: qt_method!(fn(&self, from_ms: i64, to_ms: i64)),
+    force_video_redraw:       qt_method!(fn(&self)),
+    set_video_scale:          qt_method!(fn(&self, scale: QString)),
+    grab_video_frame:         qt_method!(fn(&self, callback: QJSValue, w: f64, h: f64)),
+
+    // Connected (old-style QObject::connect, wired once in init_video_source) directly to the
+    // matching signal on the underlying MDKVideoItem — Qt invokes these like any other slot.
+    // Each re-reads the relevant field(s) off vid and re-emits the property here, so QML never
+    // touches the underlying item at all, only ever controller.video_X.
+    on_video_metadata_loaded:      qt_method!(fn(&mut self, md: QJsonObject)),
+    on_video_metadata_changed:     qt_method!(fn(&mut self)),
+    on_video_current_frame_changed: qt_method!(fn(&mut self)),
+    on_video_timestamp_changed:    qt_method!(fn(&mut self)),
+    on_video_playing_changed:      qt_method!(fn(&mut self)),
+    on_video_muted_changed:        qt_method!(fn(&mut self)),
 }
 
 impl Controller {
@@ -350,7 +409,13 @@ impl Controller {
         }
     }
 
-    fn load_video(&mut self, url: QUrl, player: QJSValue) {
+    fn load_video(&mut self, url: QUrl) {
+        // Eagerly signal "not loaded" the moment a new load starts, rather than waiting for
+        // on_video_metadata_changed — matches the old QML-side `vid.loaded = false` reset that
+        // used to run here, before video_loaded existed as a Controller-owned property.
+        self.video_loaded = false;
+        self.video_loaded_changed();
+
         self.stabilizer.clear();
         let url = util::qurl_to_encoded(url.clone());
         let filename = filesystem::get_filename(&url);
@@ -404,7 +469,7 @@ impl Controller {
             ::log::debug!("Custom decoder: {custom_decoder}");
         }
 
-        if let Some(vid) = player.to_qobject::<MDKVideoItem>() {
+        if let Some(vid) = self.video_item() {
             let vid = unsafe { &mut *vid.as_ptr() }; // vid.borrow_mut()
             filesystem::stop_accessing_url(&util::qurl_to_encoded(vid.url.clone()), false);
             filesystem::start_accessing_url(&url, false);
@@ -717,7 +782,7 @@ impl Controller {
         })(());
     }
 
-    fn video_file_loaded(&mut self, player: QJSValue) {
+    fn video_file_loaded(&mut self) {
         let stab = self.stabilizer.clone();
 
         // Try auto-detecting the secondary file if a dual-lens profile is already loaded
@@ -738,14 +803,14 @@ impl Controller {
             }
         }
 
-        if let Some(vid) = player.to_qobject::<MDKVideoItem>() {
+        if let Some(vid) = self.video_item() {
             let vid = unsafe { &mut *vid.as_ptr() }; // vid.borrow_mut()
             let duration_ms = vid.duration;
             let fps = vid.frameRate;
             let frame_count = vid.frameCount as usize;
             let video_size = (vid.videoWidth as usize, vid.videoHeight as usize);
 
-            self.set_preview_resolution(self.preview_resolution, player);
+            self.set_preview_resolution(self.preview_resolution);
 
             if duration_ms > 0.0 && fps > 0.0 {
                 stab.init_from_video_data(duration_ms, fps, frame_count, video_size);
@@ -758,14 +823,14 @@ impl Controller {
         }
     }
 
-    fn load_telemetry(&mut self, url: QUrl, is_main_video: bool, player: QJSValue, sample_index: i32, project_version: u32) {
+    fn load_telemetry(&mut self, url: QUrl, is_main_video: bool, sample_index: i32, project_version: u32) {
         let url = util::qurl_to_encoded(url);
         let stab = self.stabilizer.clone();
         let filename = filesystem::get_filename(&url);
         let mut load_options = gyroflow_core::gyro_source::FileLoadOptions::default();
         load_options.project_version = project_version as _;
 
-        if let Some(vid) = player.to_qobject::<MDKVideoItem>() {
+        if let Some(vid) = self.video_item() {
             let vid = unsafe { &mut *vid.as_ptr() }; // vid.borrow_mut()
             let duration_ms = vid.duration;
             let fps = vid.frameRate;
@@ -775,7 +840,7 @@ impl Controller {
             let cancel_flag = self.cancel_flag.clone();
 
             if is_main_video {
-                self.set_preview_resolution(self.preview_resolution, player);
+                self.set_preview_resolution(self.preview_resolution);
             }
 
             let err = util::qt_queued_callback_mut(QPointer::from(self as &Self), |this, (msg, arg): (String, String)| {
@@ -967,9 +1032,9 @@ impl Controller {
         QString::from(db.get_preset_by_id(&url_or_id.to_string()).unwrap_or_default())
     }
 
-    fn set_preview_resolution(&mut self, target_height: i32, player: QJSValue) {
+    fn set_preview_resolution(&mut self, target_height: i32) {
         self.preview_resolution = target_height;
-        if let Some(vid) = player.to_qobject::<MDKVideoItem>() {
+        if let Some(vid) = self.video_item() {
             let vid = unsafe { &mut *vid.as_ptr() }; // vid.borrow_mut()
 
             // fn aligned_to_8(mut x: u32) -> u32 { if x % 8 != 0 { x += 8 - x % 8; } x }
@@ -1100,23 +1165,44 @@ impl Controller {
         self.stabilizer.set_gpu_decoding(enabled);
     }
 
-    fn reset_player(&self, player: QJSValue) {
-        if let Some(vid) = player.to_qobject::<MDKVideoItem>() {
-            let vid = unsafe { &mut *vid.as_ptr() }; // vid.borrow_mut()
-            vid.onResize(Box::new(|_, _| { }));
-            vid.onProcessTexture(Box::new(|_, _, _, _, _, _, _, _, _, _| -> bool {
-                false
-            }));
-            vid.onProcessPixels(Box::new(|_, _, _, _, _, _| -> (u32, u32, u32, *mut u8) {
-                (0, 0, 0, std::ptr::null_mut())
-            }));
-            vid.readyForProcessing(Box::new(|| -> bool { false }));
-        }
+    /// Typed handle to this Controller's owned video source, or None before init_video_source()
+    /// has run (or after reset_video_source()). Replaces the old `player.to_qobject::<MDKVideoItem>()`
+    /// pattern — same underlying QObjectPinned type, just sourced from our own stored pointer
+    /// instead of a QML-passed QJSValue.
+    fn video_item(&self) -> Option<QObjectPinned<MDKVideoItem>> {
+        let ptr = self.vid_ptr.load(SeqCst);
+        if ptr == 0 { return None; }
+        Some(unsafe { MDKVideoItem::get_from_cpp(ptr as *mut std::ffi::c_void) })
     }
-    fn init_player(&self, player: QJSValue) {
+
+    /// Tears down this Controller's owned video source. Called before a Controller instance
+    /// is discarded and replaced (see ui_tools::init_calibrator, which unconditionally
+    /// recreates the calibrator Controller on every file load) — since Controller now owns
+    /// the item's lifetime (rather than QML owning a stable item reused across resets), the
+    /// old one must be explicitly destroyed here or repeated calibration loads would leak an
+    /// orphaned decoder per load.
+    fn reset_video_source(&mut self) {
+        let ptr = self.vid_ptr.swap(0, SeqCst);
+        qrhi_undistort::destroy_mdk_source(ptr);
+    }
+
+    /// Creates and takes ownership of this Controller's video source, parented into
+    /// `container` (a plain QML Item — never a declared MDKVideo). Mirrors init_viewport()'s
+    /// pattern. Wires the underlying item's signals directly to this Controller's on_video_*
+    /// handlers (see qrhi_undistort::wire_video_signals) and registers the frame-processing
+    /// callbacks, exactly as the old QML-driven init_player() used to.
+    fn init_video_source(&mut self, container: QJSValue) {
         use gyroflow_core::stabilization::RGBA8;
 
-        if let Some(vid) = player.to_qobject::<MDKVideoItem>() {
+        if self.vid_ptr.load(SeqCst) != 0 { self.reset_video_source(); }
+
+        let item_ptr = qrhi_undistort::create_mdk_source(&container);
+        if item_ptr == 0 { return; }
+        self.vid_ptr.store(item_ptr, SeqCst);
+        qrhi_undistort::wire_video_signals(item_ptr, self.get_cpp_object() as usize);
+
+        {
+            let vid = unsafe { MDKVideoItem::get_from_cpp(item_ptr as *mut std::ffi::c_void) };
             let vid1 = unsafe { &mut *vid.as_ptr() }; // vid.borrow_mut()
             let vid = unsafe { &mut *vid.as_ptr() }; // vid.borrow_mut()
 
@@ -1363,8 +1449,113 @@ impl Controller {
         }
     }
 
-    fn set_background_color(&mut self, color: QString, player: QJSValue) {
-        if let Some(vid) = player.to_qobject::<MDKVideoItem>() {
+    // ---------------------------------------------------------------------
+    // Video source proxy — QML calls these instead of touching the underlying
+    // MDKVideoItem, which it no longer has any reference to at all.
+    // ---------------------------------------------------------------------
+
+    fn play_video(&self)  { if let Some(vid) = self.video_item() { unsafe { &mut *vid.as_ptr() }.play();  } }
+    fn pause_video(&self) { if let Some(vid) = self.video_item() { unsafe { &mut *vid.as_ptr() }.pause(); } }
+
+    fn seek_to_frame(&self, frame: i64, exact: bool) {
+        if let Some(vid) = self.video_item() { unsafe { &mut *vid.as_ptr() }.seekToFrame(frame, exact); }
+    }
+    fn seek_to_frame_delta(&self, delta: i64) {
+        if let Some(vid) = self.video_item() { unsafe { &mut *vid.as_ptr() }.seekToFrameDelta(delta); }
+    }
+    fn set_video_timestamp(&self, ms: f64) {
+        if let Some(vid) = self.video_item() { unsafe { &mut *vid.as_ptr() }.setTimestamp(ms); }
+    }
+    fn set_video_frame_rate(&self, fps: f64) {
+        if let Some(vid) = self.video_item() { unsafe { &mut *vid.as_ptr() }.setFrameRate(fps); }
+    }
+    fn set_video_playback_range(&self, from_ms: i64, to_ms: i64) {
+        if let Some(vid) = self.video_item() { unsafe { &mut *vid.as_ptr() }.setPlaybackRange(from_ms, to_ms); }
+    }
+    fn force_video_redraw(&self) {
+        if let Some(vid) = self.video_item() { unsafe { &mut *vid.as_ptr() }.forceRedraw(); }
+    }
+    /// Replaces the old generic `vid.setProperty("scale", ...)` calls — this codebase only
+    /// ever used that with the literal key "scale", so it's exposed narrowly rather than as
+    /// a passthrough for an arbitrary property name.
+    fn set_video_scale(&self, scale: QString) {
+        if let Some(vid) = self.video_item() { unsafe { &mut *vid.as_ptr() }.setProperty(QString::from("scale"), scale); }
+    }
+    fn set_video_volume(&self, v: f32) {
+        if let Some(vid) = self.video_item() { unsafe { &mut *vid.as_ptr() }.setVolume(v); }
+    }
+
+    /// currentFrame and muted/playbackRate have real underlying signals (currentFrameChanged,
+    /// mutedChanged) that on_video_* below is connected to — so these setters only forward to
+    /// the underlying item; the mirrored property here updates when that signal fires, not
+    /// synchronously in the setter. playbackRate has no NOTIFY signal on MDKVideoItem, so it's
+    /// the one exception: updated directly here, since nothing else will ever do it.
+    fn set_video_current_frame(&mut self, frame: i64) {
+        if let Some(vid) = self.video_item() { unsafe { &mut *vid.as_ptr() }.setCurrentFrame(frame); }
+    }
+    fn set_video_muted(&mut self, v: bool) {
+        if let Some(vid) = self.video_item() { unsafe { &mut *vid.as_ptr() }.setMuted(v); }
+    }
+    fn set_video_playback_rate(&mut self, v: f32) {
+        if let Some(vid) = self.video_item() { unsafe { &mut *vid.as_ptr() }.setPlaybackRate(v); }
+        self.video_playback_rate = v;
+        self.video_playback_rate_changed();
+    }
+
+    fn grab_video_frame(&self, callback: QJSValue, w: f64, h: f64) {
+        let ptr = self.vid_ptr.load(SeqCst);
+        qrhi_undistort::grab_item_image_b64(ptr, w, h, &callback);
+    }
+
+    // ---------------------------------------------------------------------
+    // Signal handlers — connected directly to the underlying MDKVideoItem's own signals in
+    // init_video_source() (see qrhi_undistort::wire_video_signals). Each re-reads the relevant
+    // field(s) and re-emits the matching property/signal here.
+    // ---------------------------------------------------------------------
+
+    fn on_video_metadata_loaded(&mut self, md: QJsonObject) {
+        self.video_metadata_loaded(md);
+    }
+    fn on_video_metadata_changed(&mut self) {
+        if let Some(vid) = self.video_item() {
+            let vid = unsafe { &mut *vid.as_ptr() };
+            self.video_loaded = vid.videoWidth > 0;
+            self.video_duration = vid.duration;
+            self.video_frame_rate = vid.frameRate;
+            self.video_frame_count = vid.frameCount;
+            self.video_width = vid.videoWidth;
+            self.video_height = vid.videoHeight;
+        }
+        self.video_loaded_changed();
+        self.video_metadata_changed();
+    }
+    fn on_video_current_frame_changed(&mut self) {
+        if let Some(vid) = self.video_item() {
+            self.video_current_frame = unsafe { &mut *vid.as_ptr() }.currentFrame;
+        }
+        self.video_current_frame_changed();
+    }
+    fn on_video_timestamp_changed(&mut self) {
+        if let Some(vid) = self.video_item() {
+            self.video_timestamp = unsafe { &mut *vid.as_ptr() }.timestamp;
+        }
+        self.video_timestamp_changed();
+    }
+    fn on_video_playing_changed(&mut self) {
+        if let Some(vid) = self.video_item() {
+            self.video_playing = unsafe { &mut *vid.as_ptr() }.playing;
+        }
+        self.video_playing_changed();
+    }
+    fn on_video_muted_changed(&mut self) {
+        if let Some(vid) = self.video_item() {
+            self.video_muted = unsafe { &mut *vid.as_ptr() }.getMuted();
+        }
+        self.video_muted_changed();
+    }
+
+    fn set_background_color(&mut self, color: QString) {
+        if let Some(vid) = self.video_item() {
             let vid = unsafe { &mut *vid.as_ptr() }; // vid.borrow_mut()
 
             let color = QColor::from_name(&color.to_string());

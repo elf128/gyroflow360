@@ -18,7 +18,7 @@ Item {
     Ease on anchors.bottomMargin { }
     Ease on anchors.topMargin { }
 
-    readonly property real timestamp: window.videoArea.vid.timestamp;
+    readonly property real timestamp: controller.video_timestamp;
 
     onTimestampChanged: updateCharts();
     onVisibleChanged: updateCharts();

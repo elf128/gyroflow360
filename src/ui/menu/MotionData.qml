@@ -33,12 +33,12 @@ MenuItem {
         onAccepted: loadFile(selectedFile);
     }
     function loadFile(url: url): void {
-        if (!window.videoArea.vid.loaded) {
+        if (!controller.video_loaded) {
             messageBox(Modal.Error, qsTr("Video file is not loaded."), [ { text: qsTr("Ok"), accent: true } ]);
             return;
         }
         lastSelectedFile = url;
-        controller.load_telemetry(url, root.allMetadata, window.videoArea.vid, currentLog.visible && currentLog.currentIndex > 0? currentLog.currentIndex - 1 : -1, 0);
+        controller.load_telemetry(url, root.allMetadata, currentLog.visible && currentLog.currentIndex > 0? currentLog.currentIndex - 1 : -1, 0);
     }
 
     function loadGyroflow(obj: var): void {
@@ -593,8 +593,8 @@ MenuItem {
             height: width * (orgH / orgW);
             visible: false;
 
-            property real orgW: window.videoArea.outWidth  || window.videoArea.vid.videoWidth;
-            property real orgH: window.videoArea.outHeight || window.videoArea.vid.videoHeight;
+            property real orgW: window.videoArea.outWidth  || controller.video_width;
+            property real orgH: window.videoArea.outHeight || controller.video_height;
             property bool initialDraw: false
             onPaint: {
                 if (orientationCheckbox.checked || !initialDraw) {
@@ -604,7 +604,7 @@ MenuItem {
                     const maincolor = style === "light" ? "rgba(0,0,0,0.9)" : "rgba(255,255,255,0.9)";
                     const margin = 15 * dpiScale;
 
-                    const mesh = controller.mesh_at_frame(window.videoArea.vid.currentFrame);
+                    const mesh = controller.mesh_at_frame(controller.video_current_frame);
                     if (!mesh.length || mesh[0] < 10) { meshCorrection.visible = false; return; }
                     const divisions = [mesh[1], mesh[2]];
                     const mesh_size = [mesh[3], mesh[4]];
@@ -649,8 +649,8 @@ MenuItem {
             height: width * (orgH / orgW);
             visible: false;
 
-            property real orgW: window.videoArea.outWidth  || window.videoArea.vid.videoWidth;
-            property real orgH: window.videoArea.outHeight || window.videoArea.vid.videoHeight;
+            property real orgW: window.videoArea.outWidth  || controller.video_width;
+            property real orgH: window.videoArea.outHeight || controller.video_height;
             property bool initialDraw: false
             onPaint: {
                 if (orientationCheckbox.checked || !initialDraw) {
@@ -660,7 +660,7 @@ MenuItem {
                     const maincolor = style === "light" ? "rgba(0,0,0,0.9)" : "rgba(255,255,255,0.9)";
                     const margin = 15 * dpiScale;
 
-                    const mesh = controller.mesh_at_frame(window.videoArea.vid.currentFrame);
+                    const mesh = controller.mesh_at_frame(controller.video_current_frame);
                     if (!mesh.length || mesh[0] == 0 || mesh[mesh[0]] == 0) { focalPlaneDistortion.visible = false; return; }
                     const mesh_size = [mesh[3], mesh[4]];
 

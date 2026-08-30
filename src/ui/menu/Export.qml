@@ -11,7 +11,7 @@ MenuItem {
     id: root;
     text: qsTr("Export settings");
     iconName: "save";
-    innerItem.enabled: window.videoArea.vid.loaded;
+    innerItem.enabled: controller.video_loaded;
     objectName: "export";
 
     function updateCodecParams(): void {

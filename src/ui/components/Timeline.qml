@@ -29,7 +29,7 @@ Item {
     property bool fullScreen: false;
 
     property real value: 0;
-    readonly property real position: vid.timestamp / root.orgDurationMs;
+    readonly property real position: controller.video_timestamp / root.orgDurationMs;
     onPositionChanged: {
         if (ma.movingKeyframe && ma.holdingAlt) {
             let [keyframe, timestamp, name, value, id] = ma.movingKeyframe.split(":", 5);
@@ -44,16 +44,16 @@ Item {
     function getKeyframesView(): TimelineKeyframesView { return keyframes.item; }
 
     function getTimestampUs(): real {
-        return vid.timestamp * 1000;
+        return controller.video_timestamp * 1000;
     }
     function setPosition(pos: real): void {
         const frame = frameAtPosition(pos);
-        if (frame != vid.currentFrame) {
-            vid.seekToFrame(frame, true);
+        if (frame != controller.video_current_frame) {
+            controller.seek_to_frame(frame, true);
         }
     }
     function frameAtPosition(pos: real): int {
-        return Math.floor(pos * (vid.frameCount - 1));
+        return Math.floor(pos * (controller.video_frame_count - 1));
     }
 
     function timeAtPosition(pos: real): string {
@@ -203,14 +203,14 @@ Item {
         const kf = keyframes.item.nextKeyframe(typ);
         if (kf) {
             const [keyframe, timestamp, name, value] = kf.split(":", 4);
-            vid.setTimestamp(timestamp / 1000);
+            controller.set_video_timestamp(timestamp / 1000);
         }
     }
     function jumpToPrevKeyframe(typ: string): void {
         const kf = keyframes.item.prevKeyframe(typ);
         if (kf) {
             const [keyframe, timestamp, name, value] = kf.split(":", 4);
-            vid.setTimestamp(timestamp / 1000);
+            controller.set_video_timestamp(timestamp / 1000);
         }
     }
 
@@ -356,7 +356,7 @@ Item {
                 sourceComponent: Component {
                     TimelineKeyframesView {
                         id: keyframesInner;
-                        videoTimestamp: vid.timestamp;
+                        videoTimestamp: controller.video_timestamp;
                         visibleAreaLeft: root.visibleAreaLeft;
                         visibleAreaRight: root.visibleAreaRight;
                         anchors.topMargin: (root.fullScreen || window.isMobileLayout? 0 : 5) * dpiScale;
@@ -375,7 +375,7 @@ Item {
                                     return true;
                                 }
                                 if (pressed && (pressedButtons & Qt.LeftButton)) {
-                                    vid.setTimestamp(timestamp / 1000);
+                                    controller.set_video_timestamp(timestamp / 1000);
                                     return true;
                                 }
                                 ma.cursorShape = Qt.PointingHandCursor;
@@ -801,20 +801,20 @@ Item {
                     y: (root.fullScreen || window.isMobileLayout? 0 : 35) * dpiScale;
                     height: parent.height - y;
 
-                    onActiveChanged: if (active) vid.setPlaybackRange(0, vid.duration);
+                    onActiveChanged: if (active) controller.set_video_playback_range(0, controller.video_duration);
                     onTrimStartAdjustmentChanged: {
                         const dragPos = Math.max(0, trimStart + trimStartAdjustment);
                         if (mapToVisibleArea(dragPos) < 0 && dragPos >= 0) {
                             scrollbar.position = root.visibleAreaLeft = dragPos;
                         }
-                        if (!vid.playing) root.setPosition(dragPos);
+                        if (!controller.video_playing) root.setPosition(dragPos);
                     }
                     onTrimEndAdjustmentChanged: {
                         const dragPos = Math.min(1, trimEnd + trimEndAdjustment);
                         if (mapToVisibleArea(dragPos) > 1 && dragPos <= 1) {
                             root.visibleAreaRight = dragPos;
                         }
-                        if (!vid.playing) root.setPosition(dragPos);
+                        if (!controller.video_playing) root.setPosition(dragPos);
                     }
                     visible: root.trimActive;
                     onChangeTrimStart: (val) => { root.setTrimStart(index, val); };
@@ -940,7 +940,7 @@ Item {
                 unit: qsTr("px");
                 isCalibPoint: true;
                 onEdit: (ts_us, val) => {
-                    vid.setTimestamp(ts_us / 1000);
+                    controller.set_video_timestamp(ts_us / 1000);
                 }
                 onRemove: (ts_us) => {
                     root.editingSyncPoint = false;

@@ -399,94 +399,96 @@ float2 rotate_and_distort(float2 pos, uint idx, __global KernelParams *params, _
     float _x = (pos.x * matrix[0]) + (pos.y * matrix[1]) + matrix[3] + params->translation3d.x;
     float _y = (pos.x * matrix[4]) + (pos.y * matrix[5]) + matrix[7] + params->translation3d.y;
     float _z = (pos.x * matrix[8]) + (pos.y * matrix[9]) + matrix[11] + params->translation3d.z;
-    if (_z > 0.0f) {
-        if (params->r_limit > 0.0f && atan2(length((float2)(_x, _y)), _z) > atan(params->r_limit)) {
-            return (float2)(-99999.0f, -99999.0f);
-        }
 
-        if ((params->flags & 2048) && params->light_refraction_coefficient != 1.0f && params->light_refraction_coefficient > 0.0f) {
-            float r_xy      = length((float2)(_x, _y));
-            float sin_theta   = sin(atan2(r_xy, _z));
-            float sin_theta_d = sin_theta * params->light_refraction_coefficient;
-            if (sin_theta < 1.0f && sin_theta_d < 1.0f) {
-                float r   = sin_theta   / sqrt(1.0f - sin_theta   * sin_theta);
-                float r_d = sin_theta_d / sqrt(1.0f - sin_theta_d * sin_theta_d);
-                if (r_d != 0.0f) { _z *= r / r_d; }
-            }
-        }
-
-        float2 uv = params->f * distort_point(_x, _y, _z, params);
-
-        if ((params->flags & 256) && (matrix[16] != 0.0f || matrix[17] != 0.0f || matrix[18] != 0.0f || matrix[19] != 0.0f || matrix[20] != 0.0f)) {
-            float ang_rad = matrix[18];
-            float cos_a = cos(-ang_rad);
-            float sin_a = sin(-ang_rad);
-            uv = (float2)(
-                cos_a * uv.x - sin_a * uv.y - matrix[16] + matrix[19],
-                sin_a * uv.x + cos_a * uv.y - matrix[17] + matrix[20]
-            );
-        }
-
-        uv += params->c;
-
-        // MeshDistortion
-        if ((params->flags & 512) && mesh_data && mesh_data[0] > 10.0f) {
-            float2 mesh_size = (float2)(mesh_data[3], mesh_data[4]);
-            float2 origin    = (float2)(mesh_data[5], mesh_data[6]);
-            float2 crop_size = (float2)(mesh_data[7], mesh_data[8]);
-
-            if ((params->flags & 128)) uv.y = (float)params->height - uv.y; // framebuffer inverted
-
-            uv.x = map_coord(uv.x, 0.0f, (float)params->width,  origin.x, origin.x + crop_size.x);
-            uv.y = map_coord(uv.y, 0.0f, (float)params->height, origin.y, origin.y + crop_size.y);
-
-            uv = interpolate_mesh(mesh_data, mesh_size.x, mesh_size.y, uv);
-
-            uv.x = map_coord(uv.x, origin.x, origin.x + crop_size.x, 0.0f, (float)params->width);
-            uv.y = map_coord(uv.y, origin.y, origin.y + crop_size.y, 0.0f, (float)params->height);
-
-            if ((params->flags & 128)) uv.y = (float)params->height - uv.y; // framebuffer inverted
-        }
-
-        // FocalPlaneDistortion
-        if ((params->flags & 1024) && mesh_data && mesh_data[0] > 0.0f && mesh_data[(int)(mesh_data[0])] > 0.0f) {
-            int o = (int)(mesh_data[0]); // offset to focal plane distortion data
-
-            float2 mesh_size = (float2)(mesh_data[3], mesh_data[4]);
-            float2 origin    = (float2)(mesh_data[5], mesh_data[6]);
-            float2 crop_size = (float2)(mesh_data[7], mesh_data[8]);
-            float stblz_grid = mesh_size.y / 8.0f;
-
-            if ((params->flags & 128)) uv.y = (float)params->height - uv.y; // framebuffer inverted
-
-            uv.x = map_coord(uv.x, 0.0f, (float)params->width,  origin.x, origin.x + crop_size.x);
-            uv.y = map_coord(uv.y, 0.0f, (float)params->height, origin.y, origin.y + crop_size.y);
-
-            int idx = min(7, max(0, (int)floor(uv.y / stblz_grid)));
-            float delta = uv.y - stblz_grid * (float)idx;
-            uv.x -= mesh_data[o + 4 + idx * 2 + 0] * delta;
-            uv.y -= mesh_data[o + 4 + idx * 2 + 1] * delta;
-            for (int j = 0; j < idx; j++) {
-                uv.x -= mesh_data[o + 4 + j * 2 + 0] * stblz_grid;
-                uv.y -= mesh_data[o + 4 + j * 2 + 1] * stblz_grid;
-            }
-
-            uv.x = map_coord(uv.x, origin.x, origin.x + crop_size.x, 0.0f, (float)params->width);
-            uv.y = map_coord(uv.y, origin.y, origin.y + crop_size.y, 0.0f, (float)params->height);
-
-            if ((params->flags & 128)) uv.y = (float)params->height - uv.y; // framebuffer inverted
-        }
-
-        if ((params->flags & 2)) { // Has digital lens
-            uv = digital_distort_point(uv, params);
-        }
-
-        if (params->input_horizontal_stretch > 0.001f) { uv.x /= params->input_horizontal_stretch; }
-        if (params->input_vertical_stretch   > 0.001f) { uv.y /= params->input_vertical_stretch; }
-
-        return uv;
+    // No z > 0 gate: matches undistort.frag. A ray with z <= 0 is a valid direction on the
+    // back hemisphere (needed for wide-FOV / dual-lens); each model's distort_point() decides
+    // for itself whether it can project that ray (guarded models return -99999 sentinel,
+    // opencv_fisheye's atan2-based formula handles the full sphere).
+    if (params->r_limit > 0.0f && atan2(length((float2)(_x, _y)), _z) > atan(params->r_limit)) {
+        return (float2)(-99999.0f, -99999.0f);
     }
-    return (float2)(-99999.0f, -99999.0f);
+
+    if ((params->flags & 2048) && params->light_refraction_coefficient != 1.0f && params->light_refraction_coefficient > 0.0f) {
+        float r_xy      = length((float2)(_x, _y));
+        float sin_theta   = sin(atan2(r_xy, _z));
+        float sin_theta_d = sin_theta * params->light_refraction_coefficient;
+        if (sin_theta < 1.0f && sin_theta_d < 1.0f) {
+            float r   = sin_theta   / sqrt(1.0f - sin_theta   * sin_theta);
+            float r_d = sin_theta_d / sqrt(1.0f - sin_theta_d * sin_theta_d);
+            if (r_d != 0.0f) { _z *= r / r_d; }
+        }
+    }
+
+    float2 uv = params->f * distort_point(_x, _y, _z, params);
+
+    if ((params->flags & 256) && (matrix[16] != 0.0f || matrix[17] != 0.0f || matrix[18] != 0.0f || matrix[19] != 0.0f || matrix[20] != 0.0f)) {
+        float ang_rad = matrix[18];
+        float cos_a = cos(-ang_rad);
+        float sin_a = sin(-ang_rad);
+        uv = (float2)(
+            cos_a * uv.x - sin_a * uv.y - matrix[16] + matrix[19],
+            sin_a * uv.x + cos_a * uv.y - matrix[17] + matrix[20]
+        );
+    }
+
+    uv += params->c;
+
+    // MeshDistortion
+    if ((params->flags & 512) && mesh_data && mesh_data[0] > 10.0f) {
+        float2 mesh_size = (float2)(mesh_data[3], mesh_data[4]);
+        float2 origin    = (float2)(mesh_data[5], mesh_data[6]);
+        float2 crop_size = (float2)(mesh_data[7], mesh_data[8]);
+
+        if ((params->flags & 128)) uv.y = (float)params->height - uv.y; // framebuffer inverted
+
+        uv.x = map_coord(uv.x, 0.0f, (float)params->width,  origin.x, origin.x + crop_size.x);
+        uv.y = map_coord(uv.y, 0.0f, (float)params->height, origin.y, origin.y + crop_size.y);
+
+        uv = interpolate_mesh(mesh_data, mesh_size.x, mesh_size.y, uv);
+
+        uv.x = map_coord(uv.x, origin.x, origin.x + crop_size.x, 0.0f, (float)params->width);
+        uv.y = map_coord(uv.y, origin.y, origin.y + crop_size.y, 0.0f, (float)params->height);
+
+        if ((params->flags & 128)) uv.y = (float)params->height - uv.y; // framebuffer inverted
+    }
+
+    // FocalPlaneDistortion
+    if ((params->flags & 1024) && mesh_data && mesh_data[0] > 0.0f && mesh_data[(int)(mesh_data[0])] > 0.0f) {
+        int o = (int)(mesh_data[0]); // offset to focal plane distortion data
+
+        float2 mesh_size = (float2)(mesh_data[3], mesh_data[4]);
+        float2 origin    = (float2)(mesh_data[5], mesh_data[6]);
+        float2 crop_size = (float2)(mesh_data[7], mesh_data[8]);
+        float stblz_grid = mesh_size.y / 8.0f;
+
+        if ((params->flags & 128)) uv.y = (float)params->height - uv.y; // framebuffer inverted
+
+        uv.x = map_coord(uv.x, 0.0f, (float)params->width,  origin.x, origin.x + crop_size.x);
+        uv.y = map_coord(uv.y, 0.0f, (float)params->height, origin.y, origin.y + crop_size.y);
+
+        int idx = min(7, max(0, (int)floor(uv.y / stblz_grid)));
+        float delta = uv.y - stblz_grid * (float)idx;
+        uv.x -= mesh_data[o + 4 + idx * 2 + 0] * delta;
+        uv.y -= mesh_data[o + 4 + idx * 2 + 1] * delta;
+        for (int j = 0; j < idx; j++) {
+            uv.x -= mesh_data[o + 4 + j * 2 + 0] * stblz_grid;
+            uv.y -= mesh_data[o + 4 + j * 2 + 1] * stblz_grid;
+        }
+
+        uv.x = map_coord(uv.x, origin.x, origin.x + crop_size.x, 0.0f, (float)params->width);
+        uv.y = map_coord(uv.y, origin.y, origin.y + crop_size.y, 0.0f, (float)params->height);
+
+        if ((params->flags & 128)) uv.y = (float)params->height - uv.y; // framebuffer inverted
+    }
+
+    if ((params->flags & 2)) { // Has digital lens
+        uv = digital_distort_point(uv, params);
+    }
+
+    if (params->input_horizontal_stretch > 0.001f) { uv.x /= params->input_horizontal_stretch; }
+    if (params->input_vertical_stretch   > 0.001f) { uv.y /= params->input_vertical_stretch; }
+
+    return uv;
 }
 
 float2 undistort_coord(float2 out_pos, __global KernelParams *params, __global const float *matrices, __global const float *mesh_data) {

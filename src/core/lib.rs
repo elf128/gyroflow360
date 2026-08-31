@@ -554,8 +554,10 @@ impl StabilizationManager {
             )
         };
 
-        // Max zoom
-        if max_zoom_max > 50.0 && max_zoom_iters > 0 {
+        // Max zoom — also doesn't apply to 360/dual-lens sources, same reasoning as
+        // zooming::calculate_fovs: this exists to constrain how aggressive adaptive zoom is
+        // allowed to get, which is meaningless once adaptive zoom itself is skipped.
+        if params.lens2.is_none() && max_zoom_max > 50.0 && max_zoom_iters > 0 {
             params.smoothing_fov_limit_per_frame.clear();
             for _ in params.fovs.iter() {
                 params.smoothing_fov_limit_per_frame.push(1.0);
@@ -719,8 +721,8 @@ impl StabilizationManager {
                     )
                 };
 
-                // Max zoom
-                if max_zoom_max > 50.0 && max_zoom_iters > 0 {
+                // Max zoom — doesn't apply to 360/dual-lens sources, see recompute_adaptive_zoom.
+                if params.lens2.is_none() && max_zoom_max > 50.0 && max_zoom_iters > 0 {
                     params.smoothing_fov_limit_per_frame.clear();
                     for _ in params.fovs.iter() {
                         params.smoothing_fov_limit_per_frame.push(1.0);
@@ -2056,9 +2058,11 @@ impl StabilizationManager {
             KeyframeType::SmoothingParamRoll |
             KeyframeType::SmoothingParamYaw => self.invalidate_smoothing(),
 
+            // Viewport look-at direction is purely a preview/render-time concern — the viewport
+            // is independent from the stabilizer, it never affects smoothing or zoom computation.
             KeyframeType::ViewportLookAtX |
             KeyframeType::ViewportLookAtY |
-            KeyframeType::ViewportLookAtZ => self.invalidate_zooming(),
+            KeyframeType::ViewportLookAtZ => { },
 
             _ => { }
         }

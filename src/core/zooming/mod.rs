@@ -37,6 +37,17 @@ pub fn calculate_fovs(compute_params: &ComputeParams, timestamps: &[(usize, f64)
         return Default::default();
     }
 
+    // Adaptive zoom doesn't apply to 360/dual-lens sources — the whole sphere is always fully
+    // covered, so there's no "edge" that stabilization rotation could ever reveal, unlike a
+    // limited-FOV rectilinear source. Skip the expensive per-frame fov_iterative fitting entirely
+    // rather than computing it and discarding the result; zoom is manual there (KeyframeType::Fov
+    // / fov_scale), applied on top of this uniform 1.0 base the same way it already is elsewhere.
+    // lens2.is_some() is the only "is 360" signal that exists today — revisit if/when a more
+    // direct one is added.
+    if compute_params.lens2.is_some() {
+        return (vec![1.0; timestamps.len()], vec![1.0; timestamps.len()], BTreeMap::new());
+    }
+
     let mut compute_params = compute_params.clone();
     compute_params.fov_scale = 1.0;
     compute_params.fovs.clear();

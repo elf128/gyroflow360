@@ -21,6 +21,26 @@ cpp! {{
 pub fn render(mdkplayer: &MDKPlayerWrapper, viewport_ptr: usize, timestamp: f64, frame: usize, width: u32, height: u32, stab: Arc<StabilizationManager>, buffers: &mut Buffers) -> Option<ProcessedInfo> {
     if stab.prevent_recompute.load(std::sync::atomic::Ordering::SeqCst) { return None; }
 
+    // Unlike StabilizationManager::process_pixels (used by pipelines 1/2), this GLSL/Qt-RHI path
+    // (pipeline 0) calls Stabilization::ensure_stab_data_at_timestamp directly, which only ever
+    // checks its own per-timestamp cache — it has no idea ComputeParams might be stale. Without
+    // this check, a live keyframe update (e.g. dragging the 360 viewport, see
+    // Controller::set_keyframe_live) would never be picked up here until something else happened
+    // to clear stab_data, leaving GLSL preview stuck until the deferred recompute on drag release.
+    use std::sync::atomic::Ordering::SeqCst;
+    if stab.smoothing_invalidated.load(SeqCst) {
+        stab.recompute_smoothness();
+        stab.smoothing_invalidated.store(false, SeqCst);
+    }
+    if stab.zooming_invalidated.load(SeqCst) {
+        stab.recompute_adaptive_zoom();
+        stab.zooming_invalidated.store(false, SeqCst);
+    }
+    if stab.undistortion_invalidated.load(SeqCst) {
+        stab.recompute_undistortion();
+        stab.undistortion_invalidated.store(false, SeqCst);
+    }
+
     let mut timestamp_us = (timestamp * 1000.0).round() as i64;
     let mut output_size = QSize::default();
     let mut shader_path = QString::default();
@@ -181,6 +201,58 @@ pub fn viewport_native_texture(vp_ptr: usize) -> u64 {
         if (!viewport || !viewport->outputTexture()) return 0;
         return (uint64_t)viewport->outputTexture()->nativeTexture().object;
     })
+}
+
+/// Ask the item's window to render a new frame. `MDKPlayer::forceRedraw()` (qml-video-rs) only
+/// resets internal bookkeeping (`m_renderedPosition` etc.) that `windowBeforeRendering()` checks
+/// — it never actually requests a frame. If nothing else is keeping Qt Quick's render loop active
+/// (e.g. video paused, only the viewport look-at keyframe changing), `windowBeforeRendering()` —
+/// and therefore render()/process_pixels — simply never gets invoked again, no matter how many
+/// times forceRedraw() resets those flags. QQuickWindow::update() (unlike QQuickItem::update())
+/// is documented safe to call from any thread. `item_ptr` can be any QQuickItem belonging to the
+/// window that needs to render (the MDK source item or the viewport both work — same window).
+pub fn mdk_request_window_update(item_ptr: usize) {
+    if item_ptr == 0 { return; }
+    cpp!(unsafe [item_ptr as "uintptr_t"] {
+        auto *item = reinterpret_cast<QQuickItem *>(item_ptr);
+        if (item && item->window()) item->window()->update();
+    });
+}
+
+/// Upload CPU-side RGBA8 pixels into the viewport's output texture and schedule a repaint.
+/// Used by the no-native-interop preview pipeline ("OpenCL/wgpu/CPU"), where the stabilized
+/// result already lives in a plain CPU buffer (`BufferSource::Cpu` in and out) rather than a
+/// native GPU texture like the zero-copy pipeline's. `data` must be tightly packed RGBA8
+/// (stride == width * 4) — which is how `out_pixels` in controller.rs's onProcessPixels is
+/// always sized. Skips (no-op) if the buffer size doesn't match the texture's current size,
+/// which can happen for one frame right after an output-resolution change.
+/// Must be called from the render thread while a frame is being recorded (e.g. from inside the
+/// MDK processPixels callback) — same timing requirement the zero-copy pipeline already relies
+/// on, since it needs a live QRhiCommandBuffer for the current frame.
+pub fn viewport_upload_pixels(vp_ptr: usize, width: u32, height: u32, data: &[u8]) {
+    if vp_ptr == 0 || data.is_empty() { return; }
+    let data_ptr = data.as_ptr();
+    let data_len = data.len() as u32;
+    cpp!(unsafe [vp_ptr as "uintptr_t", width as "uint32_t", height as "uint32_t", data_ptr as "const char*", data_len as "uint32_t"] {
+        auto *viewport = reinterpret_cast<GyroflowViewport *>(vp_ptr);
+        if (!viewport || !viewport->outputTexture()) return;
+        if (viewport->outputTexture()->pixelSize() != QSize(width, height)) return;
+        if (data_len != width * height * 4) return;
+
+        auto *context = static_cast<QSGDefaultRenderContext *>(QQuickItemPrivate::get(viewport)->sceneGraphRenderContext());
+        if (!context) return;
+        auto *rhi = context->rhi();
+        QRhiCommandBuffer *cb = context->currentFrameCommandBuffer();
+        if (!rhi || !cb) return;
+
+        QRhiTextureSubresourceUploadDescription sub(data_ptr, data_len);
+        QRhiTextureUploadDescription desc({ QRhiTextureUploadEntry(0, 0, sub) });
+        QRhiResourceUpdateBatch *batch = rhi->nextResourceUpdateBatch();
+        batch->uploadTexture(viewport->outputTexture(), desc);
+        cb->resourceUpdate(batch);
+
+        viewport->update();
+    });
 }
 
 /// Schedule a repaint after writing into the viewport's texture via a native-texture-interop

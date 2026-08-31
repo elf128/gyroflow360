@@ -83,7 +83,15 @@ impl WgpuWrapper {
     pub fn list_devices() -> Vec<String> {
         if ADAPTERS.read().is_empty() {
             let devices = std::panic::catch_unwind(|| -> Vec<Adapter> {
-                pollster::block_on(INSTANCE.lock().enumerate_adapters(wgpu::Backends::all())).into_iter().filter(|x| !EXCLUSIONS.iter().any(|e| x.get_info().name.contains(e))).collect()
+                let all: Vec<Adapter> = pollster::block_on(INSTANCE.lock().enumerate_adapters(wgpu::Backends::all())).into_iter().filter(|x| !EXCLUSIONS.iter().any(|e| x.get_info().name.contains(e))).collect();
+                let infos: Vec<_> = all.iter().map(|a| a.get_info()).collect();
+                // The GL/EGL backend re-lists the same physical GPU a primary backend (Vulkan/Metal/DX12) already exposes.
+                // It's also unreliable to lock from a non-main thread (e.g. Qt's render thread), so drop it whenever a
+                // primary-backend adapter for the same vendor is already available.
+                all.into_iter().enumerate().filter(|(i, _)| {
+                    let info = &infos[*i];
+                    info.backend != wgpu::Backend::Gl || !infos.iter().any(|other| other.backend != wgpu::Backend::Gl && other.vendor == info.vendor)
+                }).map(|(_, a)| a).collect()
             });
             match devices {
                 Ok(devices) => { *ADAPTERS.write() = devices; },

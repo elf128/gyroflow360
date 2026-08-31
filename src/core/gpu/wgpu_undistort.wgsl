@@ -521,92 +521,93 @@ fn rotate_and_distort(pos: vec2<f32>, idx: u32, f: vec2<f32>, c: vec2<f32>, k1: 
     let _y = (pos.x * matrices[idx + 4u]) + (pos.y * matrices[idx + 5u]) + matrices[idx + 7u] + params.translation3d.y;
     var _z = (pos.x * matrices[idx + 8u]) + (pos.y * matrices[idx + 9u]) + matrices[idx + 11u] + params.translation3d.z;
 
-    if (_z > 0.0) {
-        if (params.r_limit > 0.0 && atan2(length(vec2<f32>(_x, _y)), _z) > atan(params.r_limit)) {
-            return vec2<f32>(-99999.0, -99999.0);
-        }
-
-        if (bool(flags & 2048) && params.light_refraction_coefficient != 1.0 && params.light_refraction_coefficient > 0.0) {
-            let r_xy      = length(vec2<f32>(_x, _y));
-            let sin_theta   = sin(atan2(r_xy, _z));
-            let sin_theta_d = sin_theta * params.light_refraction_coefficient;
-            if (sin_theta < 1.0 && sin_theta_d < 1.0) {
-                let r   = sin_theta   / sqrt(1.0 - sin_theta   * sin_theta);
-                let r_d = sin_theta_d / sqrt(1.0 - sin_theta_d * sin_theta_d);
-                if (r_d != 0.0) { _z *= r / r_d; }
-            }
-        }
-
-        var uv = f * distort_point(_x, _y, _z);
-
-        if (bool(flags & 256) && (matrices[idx + 16u] != 0.0 || matrices[idx + 17u] != 0.0 || matrices[idx + 18u] != 0.0 || matrices[idx + 19u] != 0.0 || matrices[idx + 20u] != 0.0)) {
-            let ang_rad = matrices[idx + 18u];
-            let cos_a = cos(-ang_rad);
-            let sin_a = sin(-ang_rad);
-            uv = vec2<f32>(
-                cos_a * uv.x - sin_a * uv.y - matrices[idx + 16u] + matrices[idx + 19u],
-                sin_a * uv.x + cos_a * uv.y - matrices[idx + 17u] + matrices[idx + 20u]
-            );
-        }
-
-        uv += c;
-
-        if (bool(flags & 512) && mesh_data[0] > 10.0) {
-            let mesh_size = vec2<f32>(mesh_data[3], mesh_data[4]);
-            let origin    = vec2<f32>(mesh_data[5], mesh_data[6]);
-            let crop_size = vec2<f32>(mesh_data[7], mesh_data[8]);
-
-            if (bool(flags & 128)) { uv.y = f32(params.height) - uv.y; } // framebuffer inverted
-
-            uv.x = map_coord(uv.x, 0.0, f32(params.width),  origin.x, origin.x + crop_size.x);
-            uv.y = map_coord(uv.y, 0.0, f32(params.height), origin.y, origin.y + crop_size.y);
-
-            uv = interpolate_mesh(mesh_size.x, mesh_size.y, uv);
-
-            uv.x = map_coord(uv.x, origin.x, origin.x + crop_size.x, 0.0, f32(params.width));
-            uv.y = map_coord(uv.y, origin.y, origin.y + crop_size.y, 0.0, f32(params.height));
-
-            if (bool(flags & 128)) { uv.y = f32(params.height) - uv.y; } // framebuffer inverted
-        }
-
-        // FocalPlaneDistortion
-        if (bool(flags & 1024) && mesh_data[0] > 0.0 && mesh_data[u32(mesh_data[0])] > 0.0) {
-            let o = u32(mesh_data[0]); // offset to focal plane distortion data
-
-            let mesh_size = vec2<f32>(mesh_data[3], mesh_data[4]);
-            let origin    = vec2<f32>(mesh_data[5], mesh_data[6]);
-            let crop_size = vec2<f32>(mesh_data[7], mesh_data[8]);
-            let stblz_grid = mesh_size.y / 8.0;
-
-            if (bool(flags & 128)) { uv.y = f32(params.height) - uv.y; } // framebuffer inverted
-
-            uv.x = map_coord(uv.x, 0.0, f32(params.width),  origin.x, origin.x + crop_size.x);
-            uv.y = map_coord(uv.y, 0.0, f32(params.height), origin.y, origin.y + crop_size.y);
-
-            let idx2 = u32(min(7, max(0, i32(floor(uv.y / stblz_grid)))));
-            let delta = uv.y - stblz_grid * f32(idx2);
-            uv.x -= mesh_data[o + 4 + idx2 * 2 + 0] * delta;
-            uv.y -= mesh_data[o + 4 + idx2 * 2 + 1] * delta;
-            for (var j = 0u; j < idx2; j++) {
-                uv.x -= mesh_data[o + 4 + j * 2 + 0] * stblz_grid;
-                uv.y -= mesh_data[o + 4 + j * 2 + 1] * stblz_grid;
-            }
-
-            uv.x = map_coord(uv.x, origin.x, origin.x + crop_size.x, 0.0, f32(params.width));
-            uv.y = map_coord(uv.y, origin.y, origin.y + crop_size.y, 0.0, f32(params.height));
-
-            if (bool(flags & 128)) { uv.y = f32(params.height) - uv.y; } // framebuffer inverted
-        }
-        if (bool(flags & 2)) { // Has digital lens
-            uv = digital_distort_point(uv);
-        }
-
-        if (params.input_horizontal_stretch > 0.001) { uv.x /= params.input_horizontal_stretch; }
-        if (params.input_vertical_stretch   > 0.001) { uv.y /= params.input_vertical_stretch; }
-
-        return uv;
+    // No z > 0 gate: matches undistort.frag. A ray with z <= 0 is a valid direction on the
+    // back hemisphere (needed for wide-FOV / dual-lens); each model's distort_point() decides
+    // for itself whether it can project that ray (guarded models return -99999 sentinel,
+    // opencv_fisheye's atan2-based formula handles the full sphere).
+    if (params.r_limit > 0.0 && atan2(length(vec2<f32>(_x, _y)), _z) > atan(params.r_limit)) {
+        return vec2<f32>(-99999.0, -99999.0);
     }
-    return vec2<f32>(-99999.0, -99999.0);
+
+    if (bool(flags & 2048) && params.light_refraction_coefficient != 1.0 && params.light_refraction_coefficient > 0.0) {
+        let r_xy      = length(vec2<f32>(_x, _y));
+        let sin_theta   = sin(atan2(r_xy, _z));
+        let sin_theta_d = sin_theta * params.light_refraction_coefficient;
+        if (sin_theta < 1.0 && sin_theta_d < 1.0) {
+            let r   = sin_theta   / sqrt(1.0 - sin_theta   * sin_theta);
+            let r_d = sin_theta_d / sqrt(1.0 - sin_theta_d * sin_theta_d);
+            if (r_d != 0.0) { _z *= r / r_d; }
+        }
+    }
+
+    var uv = f * distort_point(_x, _y, _z);
+
+    if (bool(flags & 256) && (matrices[idx + 16u] != 0.0 || matrices[idx + 17u] != 0.0 || matrices[idx + 18u] != 0.0 || matrices[idx + 19u] != 0.0 || matrices[idx + 20u] != 0.0)) {
+        let ang_rad = matrices[idx + 18u];
+        let cos_a = cos(-ang_rad);
+        let sin_a = sin(-ang_rad);
+        uv = vec2<f32>(
+            cos_a * uv.x - sin_a * uv.y - matrices[idx + 16u] + matrices[idx + 19u],
+            sin_a * uv.x + cos_a * uv.y - matrices[idx + 17u] + matrices[idx + 20u]
+        );
+    }
+
+    uv += c;
+
+    if (bool(flags & 512) && mesh_data[0] > 10.0) {
+        let mesh_size = vec2<f32>(mesh_data[3], mesh_data[4]);
+        let origin    = vec2<f32>(mesh_data[5], mesh_data[6]);
+        let crop_size = vec2<f32>(mesh_data[7], mesh_data[8]);
+
+        if (bool(flags & 128)) { uv.y = f32(params.height) - uv.y; } // framebuffer inverted
+
+        uv.x = map_coord(uv.x, 0.0, f32(params.width),  origin.x, origin.x + crop_size.x);
+        uv.y = map_coord(uv.y, 0.0, f32(params.height), origin.y, origin.y + crop_size.y);
+
+        uv = interpolate_mesh(mesh_size.x, mesh_size.y, uv);
+
+        uv.x = map_coord(uv.x, origin.x, origin.x + crop_size.x, 0.0, f32(params.width));
+        uv.y = map_coord(uv.y, origin.y, origin.y + crop_size.y, 0.0, f32(params.height));
+
+        if (bool(flags & 128)) { uv.y = f32(params.height) - uv.y; } // framebuffer inverted
+    }
+
+    // FocalPlaneDistortion
+    if (bool(flags & 1024) && mesh_data[0] > 0.0 && mesh_data[u32(mesh_data[0])] > 0.0) {
+        let o = u32(mesh_data[0]); // offset to focal plane distortion data
+
+        let mesh_size = vec2<f32>(mesh_data[3], mesh_data[4]);
+        let origin    = vec2<f32>(mesh_data[5], mesh_data[6]);
+        let crop_size = vec2<f32>(mesh_data[7], mesh_data[8]);
+        let stblz_grid = mesh_size.y / 8.0;
+
+        if (bool(flags & 128)) { uv.y = f32(params.height) - uv.y; } // framebuffer inverted
+
+        uv.x = map_coord(uv.x, 0.0, f32(params.width),  origin.x, origin.x + crop_size.x);
+        uv.y = map_coord(uv.y, 0.0, f32(params.height), origin.y, origin.y + crop_size.y);
+
+        let idx2 = u32(min(7, max(0, i32(floor(uv.y / stblz_grid)))));
+        let delta = uv.y - stblz_grid * f32(idx2);
+        uv.x -= mesh_data[o + 4 + idx2 * 2 + 0] * delta;
+        uv.y -= mesh_data[o + 4 + idx2 * 2 + 1] * delta;
+        for (var j = 0u; j < idx2; j++) {
+            uv.x -= mesh_data[o + 4 + j * 2 + 0] * stblz_grid;
+            uv.y -= mesh_data[o + 4 + j * 2 + 1] * stblz_grid;
+        }
+
+        uv.x = map_coord(uv.x, origin.x, origin.x + crop_size.x, 0.0, f32(params.width));
+        uv.y = map_coord(uv.y, origin.y, origin.y + crop_size.y, 0.0, f32(params.height));
+
+        if (bool(flags & 128)) { uv.y = f32(params.height) - uv.y; } // framebuffer inverted
+    }
+    if (bool(flags & 2)) { // Has digital lens
+        uv = digital_distort_point(uv);
+    }
+
+    if (params.input_horizontal_stretch > 0.001) { uv.x /= params.input_horizontal_stretch; }
+    if (params.input_vertical_stretch   > 0.001) { uv.y /= params.input_vertical_stretch; }
+
+    return uv;
 }
 
 fn undistort_coord(position: vec2<f32>) -> vec2<f32> {
@@ -653,7 +654,7 @@ fn undistort_coord(position: vec2<f32>) -> vec2<f32> {
     ///////////////////////////////////////////////////////////////////
     // Calculate source `y` for rolling shutter
     let mc_f = f32(params.matrix_count - 1);
-    var sy_f = select((out_pos.y + 0.5) * mc_f, (out_pos.x + 0.5) * mc_f, bool(flags & 16u));
+    var sy_f = select((out_pos.y + 0.5) * mc_f, (out_pos.x + 0.5) * mc_f, bool(flags & 16));
     var sy = u32(clamp(sy_f, 0.0, mc_f));
     if (params.matrix_count > 1) {
         let idx: u32 = u32((params.matrix_count / 2) * 21); // Use middle matrix
@@ -779,7 +780,11 @@ fn undistort(position: vec2<f32>) -> vec4<SCALAR> {
             return vec4<SCALAR>(pixel);
         }
 
-        if (bool(params.flags & 4096)) { // HAS_DUAL_LENS
+        // TEMPORARY: dual-lens blend projection isn't finished/tuned yet, so force single-lens
+        // sampling here too (lens1 covering both hemispheres), matching OpenCL/CPU (which don't
+        // implement dual-lens blending at all yet). Revert this `false &&` once lens2 projection
+        // is actually ready.
+        if (false && bool(params.flags & 4096)) { // HAS_DUAL_LENS
             // Recover the world-space direction that this output pixel corresponds to.
             // 4×4 matrix × [pos.x, pos.y, 0, 1]: skip col 2 (d=0), use col 3 (W=1)
             let wx = (g_dl_out_pos.x * matrices[g_dl_idx + 0u]) + (g_dl_out_pos.y * matrices[g_dl_idx + 1u]) + matrices[g_dl_idx + 3u] + params.translation3d.x;

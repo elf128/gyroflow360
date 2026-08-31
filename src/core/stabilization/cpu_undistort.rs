@@ -136,96 +136,105 @@ impl Stabilization {
         let _x = (pos.0 * matrices[0]) + (pos.1 * matrices[1]) + matrices[3] + params.translation3d[0];
         let _y = (pos.0 * matrices[4]) + (pos.1 * matrices[5]) + matrices[7] + params.translation3d[1];
         let mut _z = (pos.0 * matrices[8]) + (pos.1 * matrices[9]) + matrices[11] + params.translation3d[2];
-        if _z > 0.0 {
-            if r_limit_sq > 0.0 && (_x.powi(2) + _y.powi(2)).sqrt().atan2(_z) > r_limit_sq.sqrt().atan() {
-                return None;
-            }
 
-            if params.light_refraction_coefficient != 1.0 && params.light_refraction_coefficient > 0.0 {
-                let r_xy = (_x.powi(2) + _y.powi(2)).sqrt();
-                let sin_theta   = r_xy.atan2(_z).sin();
-                let sin_theta_d = sin_theta * params.light_refraction_coefficient;
-                if sin_theta < 1.0 && sin_theta_d < 1.0 {
-                    let r   = sin_theta   / (1.0 - sin_theta   * sin_theta).sqrt();
-                    let r_d = sin_theta_d / (1.0 - sin_theta_d * sin_theta_d).sqrt();
-                    if r_d != 0.0 { _z *= r / r_d; }
-                }
-            }
-
-            let mut uv = distortion_model.distort_point(_x, _y, _z, &params);
-            uv = (uv.0 * params.f[0], uv.1 * params.f[1]);
-
-            if matrices[16] != 0.0 || matrices[17] != 0.0 || matrices[18] != 0.0 || matrices[19] != 0.0 || matrices[20] != 0.0 {
-                let ang_rad = matrices[18];
-                let cos_a = (-ang_rad).cos();
-                let sin_a = (-ang_rad).sin();
-                uv = (
-                    cos_a * uv.0 - sin_a * uv.1 - matrices[16] + matrices[19],
-                    sin_a * uv.0 + cos_a * uv.1 - matrices[17] + matrices[20]
-                );
-            }
-
-            uv = (uv.0 + params.c[0], uv.1 + params.c[1]);
-
-            if !mesh_data.is_empty() && mesh_data[0] > 10.0 {
-                let mesh_size = (mesh_data[3], mesh_data[4]);
-                let origin    = (mesh_data[5] as f32, mesh_data[6] as f32);
-                let crop_size = (mesh_data[7] as f32, mesh_data[8] as f32);
-
-                if (params.flags & 128) == 128 { uv.1 = params.height as f32 - uv.1; } // framebuffer inverted
-
-                uv.0 = map_coord(uv.0, 0.0, params.width  as f32, origin.0, origin.0 + crop_size.0);
-                uv.1 = map_coord(uv.1, 0.0, params.height as f32, origin.1, origin.1 + crop_size.1);
-
-                let new_pos = crate::gyro_source::interpolate_mesh(uv.0 as f64, uv.1 as f64, (mesh_size.0, mesh_size.1), mesh_data);
-
-                uv.0 = map_coord(new_pos.x as f32, origin.0, origin.0 + crop_size.0, 0.0, params.width  as f32);
-                uv.1 = map_coord(new_pos.y as f32, origin.1, origin.1 + crop_size.1, 0.0, params.height as f32);
-
-                if (params.flags & 128) == 128 { uv.1 = params.height as f32 - uv.1; } // framebuffer inverted
-            }
-
-            // FocalPlaneDistortion
-            if !mesh_data.is_empty() && mesh_data[0] > 0.0 && mesh_data[mesh_data[0] as usize] > 0.0 {
-                let o = mesh_data[0] as usize; // offset to focal plane distortion data
-
-                let mesh_size = (mesh_data[3], mesh_data[4]);
-                let origin    = (mesh_data[5] as f32, mesh_data[6] as f32);
-                let crop_size = (mesh_data[7] as f32, mesh_data[8] as f32);
-                let stblz_grid = mesh_size.1 / 8.0;
-
-                if (params.flags & 128) == 128 { uv.1 = params.height as f32 - uv.1; } // framebuffer inverted
-
-                uv.0 = map_coord(uv.0, 0.0, params.width  as f32, origin.0, origin.0 + crop_size.0);
-                uv.1 = map_coord(uv.1, 0.0, params.height as f32, origin.1, origin.1 + crop_size.1);
-
-                let idx = (uv.1 as f64 / stblz_grid).floor().max(0.0).min(7.0) as usize;
-                let delta = uv.1 as f64 - stblz_grid * idx as f64;
-                uv.0 -= (mesh_data[o + 4 + idx * 2 + 0] * delta) as f32;
-                uv.1 -= (mesh_data[o + 4 + idx * 2 + 1] * delta) as f32;
-                for j in 0..idx {
-                    uv.0 -= (mesh_data[o + 4 + j * 2 + 0] * stblz_grid) as f32;
-                    uv.1 -= (mesh_data[o + 4 + j * 2 + 1] * stblz_grid) as f32;
-                }
-
-                uv.0 = map_coord(uv.0, origin.0, origin.0 + crop_size.0, 0.0, params.width  as f32);
-                uv.1 = map_coord(uv.1, origin.1, origin.1 + crop_size.1, 0.0, params.height as f32);
-
-                if (params.flags & 128) == 128 { uv.1 = params.height as f32 - uv.1; } // framebuffer inverted
-            }
-
-            if (params.flags & 2) == 2 { // Has digital lens
-                if let Some(digital) = digital_lens {
-                    uv = digital.distort_point(uv.0, uv.1, 1.0, params);
-                }
-            }
-
-            if params.input_horizontal_stretch > 0.001 { uv.0 /= params.input_horizontal_stretch; }
-            if params.input_vertical_stretch   > 0.001 { uv.1 /= params.input_vertical_stretch; }
-
-            return Some(uv);
+        // No z > 0 gate: matches undistort.frag. A ray with z <= 0 is a valid direction on the
+        // back hemisphere (needed for wide-FOV / dual-lens); each model's distort_point() decides
+        // for itself whether it can project that ray (guarded models return -99999 sentinel,
+        // opencv_fisheye's atan2-based formula handles the full sphere).
+        if r_limit_sq > 0.0 && (_x.powi(2) + _y.powi(2)).sqrt().atan2(_z) > r_limit_sq.sqrt().atan() {
+            return None;
         }
-        return None;
+
+        if params.light_refraction_coefficient != 1.0 && params.light_refraction_coefficient > 0.0 {
+            let r_xy = (_x.powi(2) + _y.powi(2)).sqrt();
+            let sin_theta   = r_xy.atan2(_z).sin();
+            let sin_theta_d = sin_theta * params.light_refraction_coefficient;
+            if sin_theta < 1.0 && sin_theta_d < 1.0 {
+                let r   = sin_theta   / (1.0 - sin_theta   * sin_theta).sqrt();
+                let r_d = sin_theta_d / (1.0 - sin_theta_d * sin_theta_d).sqrt();
+                if r_d != 0.0 { _z *= r / r_d; }
+            }
+        }
+
+        let raw = distortion_model.distort_point(_x, _y, _z, &params);
+        // Unlike GLSL/OpenCL/WGSL (which thread a -99999 sentinel value through the rest of the
+        // pipeline and only check it at the very end), this backend's idiom is Option<T> — a
+        // model's z <= 0 guard returning that sentinel must become a real None here, or
+        // downstream background_mode handling (e.g. mode 1's edge-clamp) would treat it as a
+        // valid in-frame coordinate instead of rejecting it.
+        if raw.0 < -99998.0 && raw.1 < -99998.0 { return None; }
+        let mut uv = raw;
+        uv = (uv.0 * params.f[0], uv.1 * params.f[1]);
+
+        if matrices[16] != 0.0 || matrices[17] != 0.0 || matrices[18] != 0.0 || matrices[19] != 0.0 || matrices[20] != 0.0 {
+            let ang_rad = matrices[18];
+            let cos_a = (-ang_rad).cos();
+            let sin_a = (-ang_rad).sin();
+            uv = (
+                cos_a * uv.0 - sin_a * uv.1 - matrices[16] + matrices[19],
+                sin_a * uv.0 + cos_a * uv.1 - matrices[17] + matrices[20]
+            );
+        }
+
+        uv = (uv.0 + params.c[0], uv.1 + params.c[1]);
+
+        if !mesh_data.is_empty() && mesh_data[0] > 10.0 {
+            let mesh_size = (mesh_data[3], mesh_data[4]);
+            let origin    = (mesh_data[5] as f32, mesh_data[6] as f32);
+            let crop_size = (mesh_data[7] as f32, mesh_data[8] as f32);
+
+            if (params.flags & 128) == 128 { uv.1 = params.height as f32 - uv.1; } // framebuffer inverted
+
+            uv.0 = map_coord(uv.0, 0.0, params.width  as f32, origin.0, origin.0 + crop_size.0);
+            uv.1 = map_coord(uv.1, 0.0, params.height as f32, origin.1, origin.1 + crop_size.1);
+
+            let new_pos = crate::gyro_source::interpolate_mesh(uv.0 as f64, uv.1 as f64, (mesh_size.0, mesh_size.1), mesh_data);
+
+            uv.0 = map_coord(new_pos.x as f32, origin.0, origin.0 + crop_size.0, 0.0, params.width  as f32);
+            uv.1 = map_coord(new_pos.y as f32, origin.1, origin.1 + crop_size.1, 0.0, params.height as f32);
+
+            if (params.flags & 128) == 128 { uv.1 = params.height as f32 - uv.1; } // framebuffer inverted
+        }
+
+        // FocalPlaneDistortion
+        if !mesh_data.is_empty() && mesh_data[0] > 0.0 && mesh_data[mesh_data[0] as usize] > 0.0 {
+            let o = mesh_data[0] as usize; // offset to focal plane distortion data
+
+            let mesh_size = (mesh_data[3], mesh_data[4]);
+            let origin    = (mesh_data[5] as f32, mesh_data[6] as f32);
+            let crop_size = (mesh_data[7] as f32, mesh_data[8] as f32);
+            let stblz_grid = mesh_size.1 / 8.0;
+
+            if (params.flags & 128) == 128 { uv.1 = params.height as f32 - uv.1; } // framebuffer inverted
+
+            uv.0 = map_coord(uv.0, 0.0, params.width  as f32, origin.0, origin.0 + crop_size.0);
+            uv.1 = map_coord(uv.1, 0.0, params.height as f32, origin.1, origin.1 + crop_size.1);
+
+            let idx = (uv.1 as f64 / stblz_grid).floor().max(0.0).min(7.0) as usize;
+            let delta = uv.1 as f64 - stblz_grid * idx as f64;
+            uv.0 -= (mesh_data[o + 4 + idx * 2 + 0] * delta) as f32;
+            uv.1 -= (mesh_data[o + 4 + idx * 2 + 1] * delta) as f32;
+            for j in 0..idx {
+                uv.0 -= (mesh_data[o + 4 + j * 2 + 0] * stblz_grid) as f32;
+                uv.1 -= (mesh_data[o + 4 + j * 2 + 1] * stblz_grid) as f32;
+            }
+
+            uv.0 = map_coord(uv.0, origin.0, origin.0 + crop_size.0, 0.0, params.width  as f32);
+            uv.1 = map_coord(uv.1, origin.1, origin.1 + crop_size.1, 0.0, params.height as f32);
+
+            if (params.flags & 128) == 128 { uv.1 = params.height as f32 - uv.1; } // framebuffer inverted
+        }
+
+        if (params.flags & 2) == 2 { // Has digital lens
+            if let Some(digital) = digital_lens {
+                uv = digital.distort_point(uv.0, uv.1, 1.0, params);
+            }
+        }
+
+        if params.input_horizontal_stretch > 0.001 { uv.0 /= params.input_horizontal_stretch; }
+        if params.input_vertical_stretch   > 0.001 { uv.1 /= params.input_vertical_stretch; }
+
+        Some(uv)
     }
 
     // Adapted from OpenCV: initUndistortRectifyMap + remap

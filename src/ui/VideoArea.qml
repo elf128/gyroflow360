@@ -92,10 +92,12 @@ Item {
         const fl = Math.sqrt(fx*fx + fy*fy + fz*fz);
         if (fl > 1e-9) { fx/=fl; fy/=fl; fz/=fl; }
 
-        // Store as a single keyframe at t=0 (constant for entire clip)
-        controller.set_keyframe("ViewportLookAtX", 0, fx);
-        controller.set_keyframe("ViewportLookAtY", 0, fy);
-        controller.set_keyframe("ViewportLookAtZ", 0, fz);
+        // Store as a single keyframe at t=0 (constant for entire clip). Uses the "live" setter
+        // (no recompute) since this fires on every drag-move pixel — see viewportDragHandler's
+        // onActiveChanged for where the deferred recompute actually gets triggered, once the drag ends.
+        controller.set_keyframe_live("ViewportLookAtX", 0, fx);
+        controller.set_keyframe_live("ViewportLookAtY", 0, fy);
+        controller.set_keyframe_live("ViewportLookAtZ", 0, fz);
         controller.force_video_redraw();
     }
 
@@ -859,6 +861,10 @@ Item {
                         if (active) {
                             prevX = centroid.position.x;
                             prevY = centroid.position.y;
+                        } else {
+                            // Drag ended — commit the FOV/smoothing recompute that rotateViewport360's
+                            // per-pixel set_keyframe_live calls deferred throughout the drag.
+                            controller.commit_keyframe_recompute();
                         }
                     }
                     onCentroidChanged: {

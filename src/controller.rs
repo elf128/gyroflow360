@@ -257,6 +257,8 @@ pub struct Controller {
     request_location: qt_signal!(url: QString, typ: QString),
 
     set_keyframe: qt_method!(fn(&self, typ: String, timestamp_us: i64, value: f64)),
+    set_keyframe_live: qt_method!(fn(&self, typ: String, timestamp_us: i64, value: f64)),
+    commit_keyframe_recompute: qt_method!(fn(&self)),
     set_keyframe_easing: qt_method!(fn(&self, typ: String, timestamp_us: i64, easing: String)),
     keyframe_easing: qt_method!(fn(&self, typ: String, timestamp_us: i64) -> String),
     set_keyframe_timestamp: qt_method!(fn(&self, typ: String, id: u32, timestamp_us: i64)),
@@ -1393,15 +1395,25 @@ impl Controller {
             let stab = self.stabilizer.clone();
             let update_info2 = update_info.clone();
             let secondary_state = self.secondary_source_state.clone();
+            let viewport_ptr = self.viewport_ptr.clone();
             vid.onProcessPixels(Box::new(move |frame, timestamp_ms, width, height, stride, pixels: &mut [u8]| -> (u32, u32, u32, *mut u8) {
                 let _time = std::time::Instant::now();
 
                 // TODO: cache in atomics instead of locking the mutex every time
                 let params = stab.params.read();
                 if !params.stab_enabled { return (0, 0, 0, std::ptr::null_mut()); }
-                let (ow, oh) = params.output_size;
-                let os = ow * 4; // Assume RGBA8 - 4 bytes per pixel
                 drop(params);
+
+                // Render at the viewport's actual (preview) resolution, not the export/kernel-params
+                // basis size — same reasoning as pipeline 1's viewport_texture_size() call. KernelParams'
+                // own output_width/height stay fixed at the export basis internally; buffers.output.size
+                // is independent of that and just says how big a target we're actually rendering into.
+                let vp = viewport_ptr.load(SeqCst);
+                if vp == 0 { return (0, 0, 0, std::ptr::null_mut()); } // viewport not yet initialised
+                let (out_w, out_h) = qrhi_undistort::viewport_texture_size(vp);
+                if out_w < 4 || out_h < 4 { return (0, 0, 0, std::ptr::null_mut()); } // viewport texture not ready yet
+                let (ow, oh) = (out_w as usize, out_h as usize);
+                let os = ow * 4; // Assume RGBA8 - 4 bytes per pixel
 
                 // Upload secondary frame for dual-lens blend
                 {
@@ -1438,6 +1450,7 @@ impl Controller {
                 match ret {
                     Ok(bk) => {
                         update_info2((bk.fov, bk.minimal_fov, bk.focal_length, QString::from(format!("Processing {}x{} using {} took {:.2}ms", width, height, bk.backend, _time.elapsed().as_micros() as f64 / 1000.0))));
+                        qrhi_undistort::viewport_upload_pixels(vp, ow as u32, oh as u32, &out_pixels);
                         (ow as u32, oh as u32, os as u32, out_pixels.as_mut_ptr())
                     },
                     Err(_) => {
@@ -1473,7 +1486,15 @@ impl Controller {
         if let Some(vid) = self.video_item() { unsafe { &mut *vid.as_ptr() }.setPlaybackRange(from_ms, to_ms); }
     }
     fn force_video_redraw(&self) {
-        if let Some(vid) = self.video_item() { unsafe { &mut *vid.as_ptr() }.forceRedraw(); }
+        if let Some(vid) = self.video_item() {
+            unsafe { &mut *vid.as_ptr() }.forceRedraw();
+            // forceRedraw() only resets MDKPlayer's internal bookkeeping — it doesn't request a
+            // frame. Without this, windowBeforeRendering() (and therefore render()/process_pixels)
+            // never fires again once Qt Quick's render loop goes idle (e.g. video paused, only a
+            // keyframe changing), which is exactly what caused the viewport to intermittently stop
+            // updating mid-drag.
+            qrhi_undistort::mdk_request_window_update(self.vid_ptr.load(SeqCst));
+        }
     }
     /// Replaces the old generic `vid.setProperty("scale", ...)` calls — this codebase only
     /// ever used that with the literal key "scale", so it's exposed narrowly rather than as
@@ -2439,6 +2460,32 @@ impl Controller {
             self.request_recompute();
             self.chart_data_changed();
         }
+    }
+    /// Same as `set_keyframe`, but skips `request_recompute()` (which triggers a whole-clip FOV/
+    /// smoothing recompute). For interactions that set many keyframe values in quick succession
+    /// where only the final value matters for computation — e.g. dragging the 360° viewport fires
+    /// this once per mouse-move pixel; the current frame still re-renders live via
+    /// `force_video_redraw` (a single-frame op), just without the expensive full-clip recompute
+    /// on every intermediate value. Call `commit_keyframe_recompute` once the interaction ends.
+    fn set_keyframe_live(&self, typ: String, timestamp_us: i64, value: f64) {
+        if let Ok(kf) = KeyframeType::from_str(&typ) {
+            self.stabilizer.set_keyframe(&kf, timestamp_us, value);
+            // Mark the ComputeParams snapshot stale and let process_pixels refresh it lazily,
+            // inside its own lock sequence, right before the next frame actually needs it.
+            // Calling recompute_undistortion() (or set_compute_params/clear_stab_data) eagerly
+            // here — from the GUI thread, on every drag-move pixel — raced against the render
+            // thread's ensure_ready_for_processing()/process_pixels() pair: it could clear
+            // stab_data in the gap between those two calls, causing intermittent
+            // NoStabilizationData errors and a viewport that stops updating mid-drag.
+            self.stabilizer.invalidate_blocking_undistortion();
+        }
+    }
+    /// Trigger the full recompute that `set_keyframe_live` deferred. Call once after a burst of
+    /// `set_keyframe_live` calls settles (e.g. on drag release).
+    fn commit_keyframe_recompute(&self) {
+        self.keyframes_changed();
+        self.request_recompute();
+        self.chart_data_changed();
     }
     fn set_keyframe_easing(&self, typ: String, timestamp_us: i64, easing: String) {
         if let Ok(kf) = KeyframeType::from_str(&typ) {

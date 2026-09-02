@@ -823,8 +823,21 @@ Item {
                     id: mdkSourceContainer;
                     anchors.fill: parent;
                     Component.onCompleted: {
-                        controller.init_video_source(this);
+                        controller.init_video_source(this, 0);
                         controller.set_background_color("#111111");
+                    }
+                }
+
+                // Second headless decoder, for a dual-lens profile's secondary video file (lens
+                // 1) — same MDKVideoItem machinery as mdkSourceContainer above, just a separate
+                // instance so both lenses decode independently and symmetrically. Only ever
+                // loaded with a file once a dual-lens profile is active (see
+                // Controller::load_secondary_video); otherwise it just sits idle.
+                Item {
+                    id: mdkSourceContainer2;
+                    anchors.fill: parent;
+                    Component.onCompleted: {
+                        controller.init_video_source(this, 1);
                     }
                 }
 

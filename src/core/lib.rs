@@ -36,7 +36,7 @@ use stabilization_params::{ ReadoutDirection, StabilizationParams };
 use lens_profile::LensProfile;
 use lens_profile_database::LensProfileDatabase;
 use smoothing::Smoothing;
-use stabilization::{ Stabilization, KernelParamsFlags, ComputeParams };
+use stabilization::{ Stabilization, KernelParamsFlags, ComputeParams, DualLensFrameSync };
 use camera_identifier::CameraIdentifier;
 pub use stabilization::PixelType;
 pub use wgpu::TextureFormat as WgpuTextureFormat;
@@ -109,6 +109,11 @@ pub struct StabilizationManager {
     pub params: Arc<RwLock<StabilizationParams>>,
 
     pub sync_data: Arc<RwLock<SyncData>>,
+
+    /// Latest decoded frame reported by each lens's own MDKPlayer callback (see
+    /// Controller::init_video_source). Lens 0 = primary, lens 1 = secondary.
+    /// Written symmetrically by both lenses; rendering currently only consumes lens 0.
+    pub dual_lens_sync: Arc<DualLensFrameSync>,
 }
 
 impl Default for StabilizationManager {
@@ -147,6 +152,8 @@ impl Default for StabilizationManager {
             camera_id: Arc::new(RwLock::new(None)),
 
             sync_data: Arc::new(RwLock::new(SyncData::default())),
+
+            dual_lens_sync: Arc::new(DualLensFrameSync::default()),
         }
     }
 }

@@ -130,7 +130,7 @@ Window {
         Qt.callLater(() => {
             ui_tools.init_calibrator();
             Qt.callLater(() => {
-                controller.init_video_source(videoArea.mdkSourceContainer);
+                controller.init_video_source(videoArea.mdkSourceContainer, 0);
                 Qt.callLater(() => {
                     videoArea.loadFile(file);
                 });

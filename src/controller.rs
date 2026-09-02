@@ -49,7 +49,7 @@ struct CalibrationItem {
 pub struct Controller {
     base: qt_base_class!(trait QObject),
 
-    init_video_source: qt_method!(fn(&mut self, container: QJSValue)),
+    init_video_source: qt_method!(fn(&mut self, container: QJSValue, lens: i32)),
     reset_video_source: qt_method!(fn(&mut self)),
     load_video: qt_method!(fn(&self, url: QUrl)),
     video_file_loaded: qt_method!(fn(&mut self)),
@@ -334,10 +334,11 @@ pub struct Controller {
 
     pub stabilizer: Arc<StabilizationManager>,
 
-    // Dual-lens: path + lazily-opened decoder shared with the preview closure
+    // Dual-lens: emitted whenever lens 1's path changes (auto-paired or manually browsed),
+    // for LensProfile.qml's status row. The actual file is loaded via a real MDKVideoItem
+    // (see load_secondary_video/init_video_source) - no separate decoder state to track here.
     dual_lens_file_changed: qt_signal!(path: QString),
     open_dual_lens_file: qt_method!(fn(&mut self, url: QString)),
-    secondary_source_state: Arc<std::sync::Mutex<(String, Option<crate::rendering::secondary_source::SecondaryVideoSource>)>>,
 
     // ---------------------------------------------------------------------
     // Video source (headless MDK decoder). Created and owned by Controller —
@@ -346,8 +347,23 @@ pub struct Controller {
     // viewport_ptr. Every property below mirrors one on MDKVideoItem; writes and
     // method calls forward to it, and its own signals are connected (in
     // init_video_source) to re-emit the matching signal here.
+    //
+    // Lens 0 (vid_ptr) is the primary video, driving the properties below and
+    // the visible viewport. Lens 1 (vid2_ptr) is the optional dual-lens
+    // secondary video — same MDKVideoItem machinery, symmetric setup and
+    // playback control (see video_item_for/init_video_source/the seek/play/pause
+    // proxies), but it has no QML-facing properties of its own yet since nothing
+    // displays it directly (see dual_lens_sync for how its frames become
+    // accessible to a future render/blend step).
     // ---------------------------------------------------------------------
     vid_ptr: Arc<AtomicUsize>,
+    vid2_ptr: Arc<AtomicUsize>,
+
+    // CPU-buffer preview pipeline's scratch output buffer. Shared (rather than a plain
+    // RefCell local to one init_video_source call) because process_pixels_frame is called
+    // symmetrically from either lens's onProcessPixels closure - both need the same
+    // scratch buffer, since it's lens 0's frame that actually gets rendered into it either way.
+    preview_out_pixels: Arc<std::sync::Mutex<Vec<u8>>>,
 
     video_loaded:         qt_property!(bool; NOTIFY video_loaded_changed),
     video_loaded_changed: qt_signal!(),
@@ -397,6 +413,12 @@ pub struct Controller {
     on_video_timestamp_changed:    qt_method!(fn(&mut self)),
     on_video_playing_changed:      qt_method!(fn(&mut self)),
     on_video_muted_changed:        qt_method!(fn(&mut self)),
+
+    // Lens 1 (dual-lens secondary) equivalent of video_metadata_loaded/on_video_metadata_loaded
+    // above — just this one signal, forwarded the same way, since VideoInformation.qml's
+    // secondary-lens info section is the only thing that needs it (see init_video_source).
+    video2_metadata_loaded:     qt_signal!(md: QJsonObject),
+    on_video2_metadata_loaded:  qt_method!(fn(&mut self, md: QJsonObject)),
 }
 
 impl Controller {
@@ -784,6 +806,25 @@ impl Controller {
         })(());
     }
 
+    /// Loads `path` (a plain filesystem path, not a URL) into lens 1's real MDKVideoItem -
+    /// same setUrl/start_accessing_url dance load_video() does for lens 0, just without the
+    /// BRAW/R3D custom-decoder detection (dual-lens cameras are never BRAW/R3D). No-op if
+    /// lens 1's item hasn't been created yet (QML's second container hasn't completed) or if
+    /// it's already showing this exact path. Always emits dual_lens_file_changed so
+    /// LensProfile.qml's status row reflects the current path either way.
+    fn load_secondary_video(&mut self, path: String) {
+        let url = filesystem::path_to_url(&path);
+        if let Some(vid) = self.video_item_for(1) {
+            let vid = unsafe { &mut *vid.as_ptr() };
+            if util::qurl_to_encoded(vid.url.clone()) != url {
+                filesystem::stop_accessing_url(&util::qurl_to_encoded(vid.url.clone()), false);
+                filesystem::start_accessing_url(&url, false);
+                vid.setUrl(QUrl::from(QString::from(url)), QString::default());
+            }
+        }
+        self.dual_lens_file_changed(QString::from(path));
+    }
+
     fn video_file_loaded(&mut self) {
         let stab = self.stabilizer.clone();
 
@@ -794,12 +835,7 @@ impl Controller {
                 let primary_url = stab.input_file.read().url.clone();
                 if !primary_url.is_empty() {
                     if let Some(sec_path) = crate::rendering::secondary_source::SecondaryVideoSource::pair_path(&primary_url) {
-                        let mut state = self.secondary_source_state.lock().unwrap();
-                        if state.0 != sec_path {
-                            state.0 = sec_path.clone();
-                            state.1 = None;
-                            self.dual_lens_file_changed(QString::from(sec_path));
-                        }
+                        self.load_secondary_video(sec_path);
                     }
                 }
             }
@@ -997,12 +1033,7 @@ impl Controller {
             let primary_url = self.stabilizer.input_file.read().url.clone();
             if !primary_url.is_empty() {
                 if let Some(sec_path) = crate::rendering::secondary_source::SecondaryVideoSource::pair_path(&primary_url) {
-                    {
-                        let mut state = self.secondary_source_state.lock().unwrap();
-                        state.0 = sec_path.clone();
-                        state.1 = None;
-                    }
-                    self.dual_lens_file_changed(QString::from(sec_path));
+                    self.load_secondary_video(sec_path);
                 }
             }
         }
@@ -1011,12 +1042,7 @@ impl Controller {
     fn open_dual_lens_file(&mut self, url: QString) {
         let path = url.to_string();
         let path = path.strip_prefix("file://").unwrap_or(&path).to_owned();
-        {
-            let mut state = self.secondary_source_state.lock().unwrap();
-            state.0 = path.clone();
-            state.1 = None; // force re-open on next preview frame
-        }
-        self.dual_lens_file_changed(QString::from(path));
+        self.load_secondary_video(path);
     }
     fn load_default_preset(&mut self) {
         // Assumes regular filesystem
@@ -1167,67 +1193,89 @@ impl Controller {
         self.stabilizer.set_gpu_decoding(enabled);
     }
 
-    /// Typed handle to this Controller's owned video source, or None before init_video_source()
-    /// has run (or after reset_video_source()). Replaces the old `player.to_qobject::<MDKVideoItem>()`
-    /// pattern — same underlying QObjectPinned type, just sourced from our own stored pointer
-    /// instead of a QML-passed QJSValue.
-    fn video_item(&self) -> Option<QObjectPinned<MDKVideoItem>> {
-        let ptr = self.vid_ptr.load(SeqCst);
+    /// The lens-0 (primary) or lens-1 (secondary) pointer slot. Lens 1 only ever
+    /// exists once a dual-lens profile's secondary file has been loaded.
+    fn vid_ptr_for(&self, lens: usize) -> &Arc<AtomicUsize> {
+        if lens == 0 { &self.vid_ptr } else { &self.vid2_ptr }
+    }
+
+    /// Typed handle to one of this Controller's owned video sources, or None before
+    /// init_video_source() has run for that lens (or after reset_video_source()).
+    /// Replaces the old `player.to_qobject::<MDKVideoItem>()` pattern — same underlying
+    /// QObjectPinned type, just sourced from our own stored pointer instead of a
+    /// QML-passed QJSValue.
+    fn video_item_for(&self, lens: usize) -> Option<QObjectPinned<MDKVideoItem>> {
+        let ptr = self.vid_ptr_for(lens).load(SeqCst);
         if ptr == 0 { return None; }
         Some(unsafe { MDKVideoItem::get_from_cpp(ptr as *mut std::ffi::c_void) })
     }
+    fn video_item(&self) -> Option<QObjectPinned<MDKVideoItem>> { self.video_item_for(0) }
 
-    /// Tears down this Controller's owned video source. Called before a Controller instance
-    /// is discarded and replaced (see ui_tools::init_calibrator, which unconditionally
-    /// recreates the calibrator Controller on every file load) — since Controller now owns
-    /// the item's lifetime (rather than QML owning a stable item reused across resets), the
-    /// old one must be explicitly destroyed here or repeated calibration loads would leak an
-    /// orphaned decoder per load.
+    /// Tears down both of this Controller's owned video sources (lens 1 is a no-op
+    /// if it was never created). Called before a Controller instance is discarded and
+    /// replaced (see ui_tools::init_calibrator, which unconditionally recreates the
+    /// calibrator Controller on every file load) — since Controller now owns the
+    /// item's lifetime (rather than QML owning a stable item reused across resets),
+    /// the old one must be explicitly destroyed here or repeated calibration loads
+    /// would leak an orphaned decoder per load.
     fn reset_video_source(&mut self) {
-        let ptr = self.vid_ptr.swap(0, SeqCst);
-        qrhi_undistort::destroy_mdk_source(ptr);
+        for lens in 0..2 {
+            let ptr = self.vid_ptr_for(lens).swap(0, SeqCst);
+            if ptr != 0 { qrhi_undistort::destroy_mdk_source(ptr); }
+        }
     }
 
-    /// Creates and takes ownership of this Controller's video source, parented into
-    /// `container` (a plain QML Item — never a declared MDKVideo). Mirrors init_viewport()'s
-    /// pattern. Wires the underlying item's signals directly to this Controller's on_video_*
-    /// handlers (see qrhi_undistort::wire_video_signals) and registers the frame-processing
-    /// callbacks, exactly as the old QML-driven init_player() used to.
-    fn init_video_source(&mut self, container: QJSValue) {
-        use gyroflow_core::stabilization::RGBA8;
+    /// Creates and takes ownership of one of this Controller's video sources (lens 0 =
+    /// primary, lens 1 = optional dual-lens secondary), parented into `container` (a plain
+    /// QML Item — never a declared MDKVideo). Mirrors init_viewport()'s pattern. Wires the
+    /// underlying item's signals to this Controller's on_video_*/on_video2_* handlers (see
+    /// qrhi_undistort::wire_video_signals) — lens 0 gets the full set, lens 1 only gets
+    /// metadataLoaded (see VideoInformation.qml's secondary-lens info section). Registers the
+    /// frame-processing callbacks for either lens identically (see the onProcessTexture/
+    /// onProcessPixels closures below and process_texture_frame/process_pixels_frame) — both
+    /// lenses report their decoded frames into stab.dual_lens_sync the same way; only lens 0's
+    /// report currently drives the visible render, but it does so by reading back out of
+    /// dual_lens_sync rather than acting on its own closure-local args directly, so a future
+    /// render task that also wants lens 1's frames extends what's read there instead of
+    /// rebuilding this plumbing.
+    fn init_video_source(&mut self, container: QJSValue, lens: i32) {
+        let lens = lens as usize;
+        use gyroflow_core::stabilization::{ LensFrame, DualLensConsumer };
 
-        if self.vid_ptr.load(SeqCst) != 0 { self.reset_video_source(); }
+        if self.vid_ptr_for(lens).load(SeqCst) != 0 {
+            let ptr = self.vid_ptr_for(lens).swap(0, SeqCst);
+            qrhi_undistort::destroy_mdk_source(ptr);
+        }
 
         let item_ptr = qrhi_undistort::create_mdk_source(&container);
         if item_ptr == 0 { return; }
-        self.vid_ptr.store(item_ptr, SeqCst);
-        qrhi_undistort::wire_video_signals(item_ptr, self.get_cpp_object() as usize);
+        self.vid_ptr_for(lens).store(item_ptr, SeqCst);
+        qrhi_undistort::wire_video_signals(item_ptr, self.get_cpp_object() as usize, lens as i32);
 
         {
             let vid = unsafe { MDKVideoItem::get_from_cpp(item_ptr as *mut std::ffi::c_void) };
-            let vid1 = unsafe { &mut *vid.as_ptr() }; // vid.borrow_mut()
             let vid = unsafe { &mut *vid.as_ptr() }; // vid.borrow_mut()
 
-            let bg_color = vid.getBackgroundColor().get_rgba_f();
-            self.stabilizer.params.write().background = Vector4::new(bg_color.0 as f32, bg_color.1 as f32, bg_color.2 as f32, bg_color.3 as f32);
-            {
-                let mut stab = self.stabilizer.stabilization.write();
-                stab.kernel_flags.set(KernelParamsFlags::DRAWING_ENABLED, true);
-                stab.cache_frame_transform = true;
-            }
-            let request_recompute = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, _: ()| {
-                this.request_recompute();
-            });
-            let stab = self.stabilizer.clone();
-            vid.onResize(Box::new(move |width, height| {
-                let current_size = stab.params.read().size;
-                if current_size.0 != width as usize || current_size.1 != height as usize {
-                    stab.init_size();
-                    request_recompute(());
+            if lens == 0 {
+                let bg_color = vid.getBackgroundColor().get_rgba_f();
+                self.stabilizer.params.write().background = Vector4::new(bg_color.0 as f32, bg_color.1 as f32, bg_color.2 as f32, bg_color.3 as f32);
+                {
+                    let mut stab = self.stabilizer.stabilization.write();
+                    stab.kernel_flags.set(KernelParamsFlags::DRAWING_ENABLED, true);
+                    stab.cache_frame_transform = true;
                 }
-            }));
-
-            use gyroflow_core::gpu::{ BufferDescription, Buffers, BufferSource };
+                let request_recompute = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, _: ()| {
+                    this.request_recompute();
+                });
+                let stab = self.stabilizer.clone();
+                vid.onResize(Box::new(move |width, height| {
+                    let current_size = stab.params.read().size;
+                    if current_size.0 != width as usize || current_size.1 != height as usize {
+                        stab.init_size();
+                        request_recompute(());
+                    }
+                }));
+            }
 
             let stab = self.stabilizer.clone();
             vid.readyForProcessing(Box::new(move || -> bool {
@@ -1236,7 +1284,7 @@ impl Controller {
             let stab = self.stabilizer.clone();
             let preview_pipeline = self.preview_pipeline.clone();
             let viewport_ptr = self.viewport_ptr.clone();
-            let out_pixels = RefCell::new(Vec::new());
+            let primary_vid_ptr = self.vid_ptr.clone();
             let update_info = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, (fov, minimal_fov, focal_length, info): (f64, f64, Option<f64>, QString)| {
                 this.current_fov = fov;
                 this.current_minimal_fov = minimal_fov;
@@ -1249,216 +1297,274 @@ impl Controller {
             #[allow(unused_variables)]
             vid.onProcessTexture(Box::new(move |frame, timestamp_ms, width, height, backend_id, ptr1, ptr2, ptr3, ptr4, ptr5| -> bool {
                 if width < 4 || height < 4 || backend_id == 0 { return false; }
-
                 if !stab.params.read().stab_enabled { return true; }
 
-                let _time = std::time::Instant::now();
+                stab.dual_lens_sync.submit(lens, frame as i64, LensFrame::Texture { backend_id, ptr1, ptr2, ptr3, ptr4, ptr5, width, height });
 
-                if preview_pipeline.load(SeqCst) == 0 {
-                    let vp = viewport_ptr.load(SeqCst);
-                    if vp == 0 { return true; } // viewport not yet initialised
-
-                    let mut buffers = Buffers{
-                        input:  BufferDescription { size: (width as usize, height as usize, width as usize * 4), ..Default::default() },
-                        output: BufferDescription { size: (width as usize, height as usize, width as usize * 4), ..Default::default() },
-                    };
-
-                    let (offset, fps) = {
-                        let params = stab.params.read();
-                        (params.frame_offset, params.fps)
-                    };
-                    let frame = (frame as i32 + offset).max(0) as u32;
-                    let timestamp_ms = timestamp_ms + (offset as f64 / fps * 1000.0).round();
-
-                    if let Some(ret) = qrhi_undistort::render(vid1.get_mdkplayer(), vp, timestamp_ms, frame as usize, width, height, stab.clone(), &mut buffers) {
-                        update_info2((ret.fov, ret.minimal_fov, ret.focal_length, QString::from(format!("Processing {}x{} using {} took {:.2}ms", width, height, ret.backend, _time.elapsed().as_micros() as f64 / 1000.0))));
-                    } else {
-                        update_info2((1.0, 1.0, None, QString::from("---")));
-                    }
-                    return true;
-                }
-
-                if preview_pipeline.load(SeqCst) > 1 { return false; }
-
-                // Pipeline 1 ("Zero-copy OpenCL"/native texture interop): read MDK's decoded
-                // frame (ptr1, decode resolution) and write natively into the viewport's own
-                // texture (its own, independently-sized, resolution) — never back into MDK's
-                // texture in place. MDK is a headless decoder/texture source only from here on.
-                let vp = viewport_ptr.load(SeqCst);
-                if vp == 0 { return true; } // viewport not yet initialised
-                let (out_w, out_h) = qrhi_undistort::viewport_texture_size(vp);
-                if out_w < 4 || out_h < 4 { return true; } // viewport texture not ready yet
-                let out_native = qrhi_undistort::viewport_native_texture(vp);
-                if out_native == 0 { return true; }
-
-                let in_size  = (width as usize, height as usize, width as usize * 4);
-                let out_size = (out_w as usize, out_h as usize, out_w as usize * 4);
-
-                let mut buffers =
-                    match backend_id {
-                        1 => { // OpenGL, ptr1: texture, ptr2: opengl context
-                            Some((Buffers {
-                                input: BufferDescription {
-                                    size: in_size,
-                                    data: BufferSource::OpenGL {
-                                        texture: ptr1 as u32,
-                                        context: ptr2 as *mut std::ffi::c_void
-                                    }, ..Default::default()
-                                },
-                                output: BufferDescription {
-                                    size: out_size,
-                                    data: BufferSource::OpenGL {
-                                        texture: out_native as u32,
-                                        context: ptr2 as *mut std::ffi::c_void
-                                    }, ..Default::default()
-                                },
-                            },
-                            "OpenGL"))
-                        },
-                        #[cfg(any(target_os = "macos", target_os = "ios"))]
-                        2 => { // Metal, ptr1: texture, ptr2: device, ptr3: command queue
-                            Some((Buffers {
-                                input: BufferDescription {
-                                    size: in_size,
-                                    data: BufferSource::Metal { texture: ptr1 as *mut std::ffi::c_void, command_queue: ptr3 as *mut std::ffi::c_void }, ..Default::default()
-                                },
-                                output: BufferDescription {
-                                    size: out_size,
-                                    texture_copy: true,
-                                    data: BufferSource::Metal { texture: out_native as *mut std::ffi::c_void, command_queue: ptr3 as *mut std::ffi::c_void }, ..Default::default()
-                                },
-                            },
-                            "Metal"))
-                        },
-                        #[cfg(target_os = "windows")]
-                        3 => { // D3D11, ptr1: texture, ptr2: device, ptr3: device context
-                            Some((Buffers {
-                                input: BufferDescription {
-                                    size: in_size,
-                                    texture_copy: true,
-                                    data: BufferSource::DirectX11 {
-                                        texture: ptr1 as *mut std::ffi::c_void,
-                                        device:  ptr2 as *mut std::ffi::c_void,
-                                        device_context: ptr3 as *mut std::ffi::c_void
-                                    }, ..Default::default()
-                                },
-                                output: BufferDescription {
-                                    size: out_size,
-                                    texture_copy: true,
-                                    data: BufferSource::DirectX11 {
-                                        texture: out_native as *mut std::ffi::c_void,
-                                        device:  ptr2 as *mut std::ffi::c_void,
-                                        device_context: ptr3 as *mut std::ffi::c_void
-                                    }, ..Default::default()
-                                },
-                            },
-                            "DirectX11"))
-                        },
-                        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-                        4 => { // Vulkan, ptr1: VkImage, ptr2: VkDevice, ptr3: VkCommandBuffer, ptr4: VkPhysicalDevice, ptr5: VkInstance
-                            Some((Buffers {
-                                input: BufferDescription {
-                                    size: in_size,
-                                    texture_copy: false,
-                                    data: BufferSource::Vulkan { texture: ptr1, device: ptr2, physical_device: ptr4, instance: ptr5 },
-                                    ..Default::default()
-                                },
-                                output: BufferDescription {
-                                    size: out_size,
-                                    texture_copy: true,
-                                    data: BufferSource::Vulkan { texture: out_native, device: ptr2, physical_device: ptr4, instance: ptr5 },
-                                    ..Default::default()
-                                },
-                            },
-                            "Vulkan"))
-                        }
-                        _ => None
-                    };
-
-                if let Some((ref mut buffers, backend)) = buffers {
-                    match stab.process_pixels::<RGBA8>((timestamp_ms * 1000.0).round() as i64, Some(frame as usize), buffers) {
-                        Ok(ret) =>  {
-                            qrhi_undistort::viewport_request_update(vp);
-                            update_info2((ret.fov, ret.minimal_fov, ret.focal_length, QString::from(format!("Processing {}x{} -> {}x{} using {backend}->{} took {:.2}ms", width, height, out_w, out_h, ret.backend, _time.elapsed().as_micros() as f64 / 1000.0))));
-                            return true;
-                        },
-                        Err(e) => {
-                            ::log::error!("Failed to process pixels: {e:?}");
+                if lens == 0 {
+                    // Own tick: always drive rendering directly with our own fresh args,
+                    // exactly as before unification - this must stay unconditional so
+                    // force_video_redraw() (same frame index, changed keyframe) still works.
+                    stab.dual_lens_sync.try_consume(DualLensConsumer::Texture, frame as i64);
+                    Self::process_texture_frame(&stab, &viewport_ptr, &preview_pipeline, &update_info2, &primary_vid_ptr, frame, timestamp_ms, width, height, backend_id, ptr1, ptr2, ptr3, ptr4, ptr5)
+                } else {
+                    // Secondary tick: opportunistically drive the same render step from lens
+                    // 0's latched frame, only if lens 0's own tick hasn't already done so this
+                    // same frame index (the common case - lens 0 fires first, same window tick).
+                    if let Some((frame_idx0, LensFrame::Texture { backend_id: b0, ptr1: p1, ptr2: p2, ptr3: p3, ptr4: p4, ptr5: p5, width: w0, height: h0 })) = stab.dual_lens_sync.latest(0) {
+                        if stab.dual_lens_sync.try_consume(DualLensConsumer::Texture, frame_idx0) {
+                            Self::process_texture_frame(&stab, &viewport_ptr, &preview_pipeline, &update_info2, &primary_vid_ptr, frame_idx0 as u32, timestamp_ms, w0, h0, b0, p1, p2, p3, p4, p5);
                         }
                     }
+                    preview_pipeline.load(SeqCst) <= 1
                 }
-
-                update_info2((1.0, 1.0, None, QString::from("---")));
-                false
             }));
 
             let stab = self.stabilizer.clone();
             let update_info2 = update_info.clone();
-            let secondary_state = self.secondary_source_state.clone();
             let viewport_ptr = self.viewport_ptr.clone();
+            let out_pixels = self.preview_out_pixels.clone();
             vid.onProcessPixels(Box::new(move |frame, timestamp_ms, width, height, stride, pixels: &mut [u8]| -> (u32, u32, u32, *mut u8) {
-                let _time = std::time::Instant::now();
+                stab.dual_lens_sync.submit(lens, frame as i64, LensFrame::Buffer { data: pixels.to_vec(), width, height, stride });
 
-                // TODO: cache in atomics instead of locking the mutex every time
-                let params = stab.params.read();
-                if !params.stab_enabled { return (0, 0, 0, std::ptr::null_mut()); }
-                drop(params);
-
-                // Render at the viewport's actual (preview) resolution, not the export/kernel-params
-                // basis size — same reasoning as pipeline 1's viewport_texture_size() call. KernelParams'
-                // own output_width/height stay fixed at the export basis internally; buffers.output.size
-                // is independent of that and just says how big a target we're actually rendering into.
-                let vp = viewport_ptr.load(SeqCst);
-                if vp == 0 { return (0, 0, 0, std::ptr::null_mut()); } // viewport not yet initialised
-                let (out_w, out_h) = qrhi_undistort::viewport_texture_size(vp);
-                if out_w < 4 || out_h < 4 { return (0, 0, 0, std::ptr::null_mut()); } // viewport texture not ready yet
-                let (ow, oh) = (out_w as usize, out_h as usize);
-                let os = ow * 4; // Assume RGBA8 - 4 bytes per pixel
-
-                // Upload secondary frame for dual-lens blend
-                {
-                    let mut state = secondary_state.lock().unwrap();
-                    if !state.0.is_empty() {
-                        if state.1.is_none() {
-                            state.1 = crate::rendering::secondary_source::SecondaryVideoSource::open(&state.0).ok();
-                        }
-                        if let Some(ref mut src) = state.1 {
-                            let ts_us = (timestamp_ms * 1000.0).round() as i64;
-                            src.seek_to_us(ts_us);
-                            if let Some(rgba) = src.next_frame_as_rgba8(width as u32, height as u32) {
-                                stab.upload_input2_data(&rgba, width as u32, height as u32, (width * 4) as u32);
-                            }
+                if lens == 0 {
+                    stab.dual_lens_sync.try_consume(DualLensConsumer::Buffer, frame as i64);
+                    Self::process_pixels_frame(&stab, &viewport_ptr, &update_info2, &out_pixels, frame, timestamp_ms, width, height, stride, pixels)
+                } else {
+                    if let Some((frame_idx0, LensFrame::Buffer { mut data, width: w0, height: h0, stride: s0 })) = stab.dual_lens_sync.latest(0) {
+                        if stab.dual_lens_sync.try_consume(DualLensConsumer::Buffer, frame_idx0) {
+                            Self::process_pixels_frame(&stab, &viewport_ptr, &update_info2, &out_pixels, frame_idx0 as u32, timestamp_ms, w0, h0, s0, &mut data);
                         }
                     }
-                }
-
-                let mut out_pixels = out_pixels.borrow_mut();
-                out_pixels.resize_with(os*oh, u8::default);
-
-                let ret = stab.process_pixels::<RGBA8>((timestamp_ms * 1000.0).round() as i64, Some(frame as usize), &mut Buffers {
-                    input: BufferDescription {
-                        size: (width as usize, height as usize, stride as usize),
-                        data: BufferSource::Cpu { buffer: pixels },
-                        ..Default::default()
-                    },
-                    output: BufferDescription {
-                        size: (ow, oh, os),
-                        data: BufferSource::Cpu { buffer: &mut out_pixels },
-                        ..Default::default()
-                    },
-                });
-                match ret {
-                    Ok(bk) => {
-                        update_info2((bk.fov, bk.minimal_fov, bk.focal_length, QString::from(format!("Processing {}x{} using {} took {:.2}ms", width, height, bk.backend, _time.elapsed().as_micros() as f64 / 1000.0))));
-                        qrhi_undistort::viewport_upload_pixels(vp, ow as u32, oh as u32, &out_pixels);
-                        (ow as u32, oh as u32, os as u32, out_pixels.as_mut_ptr())
-                    },
-                    Err(_) => {
-                        update_info2((1.0, 1.0, None, QString::from("---")));
-                        (0, 0, 0, std::ptr::null_mut())
-                    }
+                    (0, 0, 0, std::ptr::null_mut())
                 }
             }));
+        }
+    }
+
+    /// Shared by lens 0's own tick (unconditional, using its own fresh args) and lens 1's
+    /// tick (opportunistic, using lens 0's args latched via stab.dual_lens_sync) - see
+    /// init_video_source. Identical to the pre-unification pipeline-0/pipeline-1 logic,
+    /// just parameterized instead of embedded in one closure. `ptr3`/`ptr4`/`ptr5` are only
+    /// read on the Metal/D3D11/Vulkan-specific branches below, so they're genuinely unused
+    /// on other platforms - same as the pre-unification closure this replaced.
+    #[allow(clippy::too_many_arguments, unused_variables)]
+    fn process_texture_frame<F: Fn((f64, f64, Option<f64>, QString))>(
+        stab: &Arc<StabilizationManager>,
+        viewport_ptr: &Arc<AtomicUsize>,
+        preview_pipeline: &Arc<AtomicUsize>,
+        update_info2: &F,
+        primary_vid_ptr: &Arc<AtomicUsize>,
+        frame: u32, timestamp_ms: f64, width: u32, height: u32, backend_id: u32,
+        ptr1: u64, ptr2: u64, ptr3: u64, ptr4: u64, ptr5: u64,
+    ) -> bool {
+        use gyroflow_core::gpu::{ BufferDescription, Buffers, BufferSource };
+        use gyroflow_core::stabilization::RGBA8;
+
+        let _time = std::time::Instant::now();
+
+        if preview_pipeline.load(SeqCst) == 0 {
+            let vp = viewport_ptr.load(SeqCst);
+            if vp == 0 { return true; } // viewport not yet initialised
+
+            let mut buffers = Buffers{
+                input:  BufferDescription { size: (width as usize, height as usize, width as usize * 4), ..Default::default() },
+                output: BufferDescription { size: (width as usize, height as usize, width as usize * 4), ..Default::default() },
+            };
+
+            let (offset, fps) = {
+                let params = stab.params.read();
+                (params.frame_offset, params.fps)
+            };
+            let frame = (frame as i32 + offset).max(0) as u32;
+            let timestamp_ms = timestamp_ms + (offset as f64 / fps * 1000.0).round();
+
+            let primary_ptr = primary_vid_ptr.load(SeqCst);
+            if primary_ptr == 0 { return true; }
+            let vid0 = unsafe { &mut *MDKVideoItem::get_from_cpp(primary_ptr as *mut std::ffi::c_void).as_ptr() };
+
+            if let Some(ret) = qrhi_undistort::render(vid0.get_mdkplayer(), vp, timestamp_ms, frame as usize, width, height, stab.clone(), &mut buffers) {
+                update_info2((ret.fov, ret.minimal_fov, ret.focal_length, QString::from(format!("Processing {}x{} using {} took {:.2}ms", width, height, ret.backend, _time.elapsed().as_micros() as f64 / 1000.0))));
+            } else {
+                update_info2((1.0, 1.0, None, QString::from("---")));
+            }
+            return true;
+        }
+
+        if preview_pipeline.load(SeqCst) > 1 { return false; }
+
+        // Pipeline 1 ("Zero-copy OpenCL"/native texture interop): read MDK's decoded
+        // frame (ptr1, decode resolution) and write natively into the viewport's own
+        // texture (its own, independently-sized, resolution) — never back into MDK's
+        // texture in place. MDK is a headless decoder/texture source only from here on.
+        let vp = viewport_ptr.load(SeqCst);
+        if vp == 0 { return true; } // viewport not yet initialised
+        let (out_w, out_h) = qrhi_undistort::viewport_texture_size(vp);
+        if out_w < 4 || out_h < 4 { return true; } // viewport texture not ready yet
+        let out_native = qrhi_undistort::viewport_native_texture(vp);
+        if out_native == 0 { return true; }
+
+        let in_size  = (width as usize, height as usize, width as usize * 4);
+        let out_size = (out_w as usize, out_h as usize, out_w as usize * 4);
+
+        let mut buffers =
+            match backend_id {
+                1 => { // OpenGL, ptr1: texture, ptr2: opengl context
+                    Some((Buffers {
+                        input: BufferDescription {
+                            size: in_size,
+                            data: BufferSource::OpenGL {
+                                texture: ptr1 as u32,
+                                context: ptr2 as *mut std::ffi::c_void
+                            }, ..Default::default()
+                        },
+                        output: BufferDescription {
+                            size: out_size,
+                            data: BufferSource::OpenGL {
+                                texture: out_native as u32,
+                                context: ptr2 as *mut std::ffi::c_void
+                            }, ..Default::default()
+                        },
+                    },
+                    "OpenGL"))
+                },
+                #[cfg(any(target_os = "macos", target_os = "ios"))]
+                2 => { // Metal, ptr1: texture, ptr2: device, ptr3: command queue
+                    Some((Buffers {
+                        input: BufferDescription {
+                            size: in_size,
+                            data: BufferSource::Metal { texture: ptr1 as *mut std::ffi::c_void, command_queue: ptr3 as *mut std::ffi::c_void }, ..Default::default()
+                        },
+                        output: BufferDescription {
+                            size: out_size,
+                            texture_copy: true,
+                            data: BufferSource::Metal { texture: out_native as *mut std::ffi::c_void, command_queue: ptr3 as *mut std::ffi::c_void }, ..Default::default()
+                        },
+                    },
+                    "Metal"))
+                },
+                #[cfg(target_os = "windows")]
+                3 => { // D3D11, ptr1: texture, ptr2: device, ptr3: device context
+                    Some((Buffers {
+                        input: BufferDescription {
+                            size: in_size,
+                            texture_copy: true,
+                            data: BufferSource::DirectX11 {
+                                texture: ptr1 as *mut std::ffi::c_void,
+                                device:  ptr2 as *mut std::ffi::c_void,
+                                device_context: ptr3 as *mut std::ffi::c_void
+                            }, ..Default::default()
+                        },
+                        output: BufferDescription {
+                            size: out_size,
+                            texture_copy: true,
+                            data: BufferSource::DirectX11 {
+                                texture: out_native as *mut std::ffi::c_void,
+                                device:  ptr2 as *mut std::ffi::c_void,
+                                device_context: ptr3 as *mut std::ffi::c_void
+                            }, ..Default::default()
+                        },
+                    },
+                    "DirectX11"))
+                },
+                #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+                4 => { // Vulkan, ptr1: VkImage, ptr2: VkDevice, ptr3: VkCommandBuffer, ptr4: VkPhysicalDevice, ptr5: VkInstance
+                    Some((Buffers {
+                        input: BufferDescription {
+                            size: in_size,
+                            texture_copy: false,
+                            data: BufferSource::Vulkan { texture: ptr1, device: ptr2, physical_device: ptr4, instance: ptr5 },
+                            ..Default::default()
+                        },
+                        output: BufferDescription {
+                            size: out_size,
+                            texture_copy: true,
+                            data: BufferSource::Vulkan { texture: out_native, device: ptr2, physical_device: ptr4, instance: ptr5 },
+                            ..Default::default()
+                        },
+                    },
+                    "Vulkan"))
+                }
+                _ => None
+            };
+
+        if let Some((ref mut buffers, backend)) = buffers {
+            match stab.process_pixels::<RGBA8>((timestamp_ms * 1000.0).round() as i64, Some(frame as usize), buffers) {
+                Ok(ret) =>  {
+                    qrhi_undistort::viewport_request_update(vp);
+                    update_info2((ret.fov, ret.minimal_fov, ret.focal_length, QString::from(format!("Processing {}x{} -> {}x{} using {backend}->{} took {:.2}ms", width, height, out_w, out_h, ret.backend, _time.elapsed().as_micros() as f64 / 1000.0))));
+                    return true;
+                },
+                Err(e) => {
+                    ::log::error!("Failed to process pixels: {e:?}");
+                }
+            }
+        }
+
+        update_info2((1.0, 1.0, None, QString::from("---")));
+        false
+    }
+
+    /// Shared by lens 0's own tick (unconditional, using its own borrowed pixel slice) and
+    /// lens 1's tick (opportunistic, using an owned copy of lens 0's pixels latched via
+    /// stab.dual_lens_sync) - see init_video_source. Identical to the pre-unification
+    /// onProcessPixels logic, minus the old ffmpeg-based secondary-source upload (lens 2 is
+    /// now a real MDKPlayer reporting through dual_lens_sync instead).
+    #[allow(clippy::too_many_arguments)]
+    fn process_pixels_frame<F: Fn((f64, f64, Option<f64>, QString))>(
+        stab: &Arc<StabilizationManager>,
+        viewport_ptr: &Arc<AtomicUsize>,
+        update_info2: &F,
+        out_pixels: &Arc<std::sync::Mutex<Vec<u8>>>,
+        frame: u32, timestamp_ms: f64, width: u32, height: u32, stride: u32,
+        pixels: &mut [u8],
+    ) -> (u32, u32, u32, *mut u8) {
+        use gyroflow_core::gpu::{ BufferDescription, Buffers, BufferSource };
+        use gyroflow_core::stabilization::RGBA8;
+
+        let _time = std::time::Instant::now();
+
+        // TODO: cache in atomics instead of locking the mutex every time
+        let params = stab.params.read();
+        if !params.stab_enabled { return (0, 0, 0, std::ptr::null_mut()); }
+        drop(params);
+
+        // Render at the viewport's actual (preview) resolution, not the export/kernel-params
+        // basis size — same reasoning as pipeline 1's viewport_texture_size() call. KernelParams'
+        // own output_width/height stay fixed at the export basis internally; buffers.output.size
+        // is independent of that and just says how big a target we're actually rendering into.
+        let vp = viewport_ptr.load(SeqCst);
+        if vp == 0 { return (0, 0, 0, std::ptr::null_mut()); } // viewport not yet initialised
+        let (out_w, out_h) = qrhi_undistort::viewport_texture_size(vp);
+        if out_w < 4 || out_h < 4 { return (0, 0, 0, std::ptr::null_mut()); } // viewport texture not ready yet
+        let (ow, oh) = (out_w as usize, out_h as usize);
+        let os = ow * 4; // Assume RGBA8 - 4 bytes per pixel
+
+        let mut out_pixels = out_pixels.lock().unwrap();
+        out_pixels.resize_with(os*oh, u8::default);
+
+        let ret = stab.process_pixels::<RGBA8>((timestamp_ms * 1000.0).round() as i64, Some(frame as usize), &mut Buffers {
+            input: BufferDescription {
+                size: (width as usize, height as usize, stride as usize),
+                data: BufferSource::Cpu { buffer: pixels },
+                ..Default::default()
+            },
+            output: BufferDescription {
+                size: (ow, oh, os),
+                data: BufferSource::Cpu { buffer: &mut out_pixels },
+                ..Default::default()
+            },
+        });
+        match ret {
+            Ok(bk) => {
+                update_info2((bk.fov, bk.minimal_fov, bk.focal_length, QString::from(format!("Processing {}x{} using {} took {:.2}ms", width, height, bk.backend, _time.elapsed().as_micros() as f64 / 1000.0))));
+                qrhi_undistort::viewport_upload_pixels(vp, ow as u32, oh as u32, &out_pixels);
+                (ow as u32, oh as u32, os as u32, out_pixels.as_mut_ptr())
+            },
+            Err(_) => {
+                update_info2((1.0, 1.0, None, QString::from("---")));
+                (0, 0, 0, std::ptr::null_mut())
+            }
         }
     }
 
@@ -1467,41 +1573,55 @@ impl Controller {
     // MDKVideoItem, which it no longer has any reference to at all.
     // ---------------------------------------------------------------------
 
-    fn play_video(&self)  { if let Some(vid) = self.video_item() { unsafe { &mut *vid.as_ptr() }.play();  } }
-    fn pause_video(&self) { if let Some(vid) = self.video_item() { unsafe { &mut *vid.as_ptr() }.pause(); } }
+    /// Applies `f` to whichever of lens 0/lens 1's video items currently exist. Position/timing
+    /// controls below use this so seeks/play/pause/etc. always act on both lenses symmetrically
+    /// - lens 1 is never just a passive follower of lens 0's own seeks.
+    fn for_each_video_item(&self, mut f: impl FnMut(&mut MDKVideoItem)) {
+        for lens in 0..2 {
+            if let Some(vid) = self.video_item_for(lens) {
+                f(unsafe { &mut *vid.as_ptr() });
+            }
+        }
+    }
+
+    fn play_video(&self)  { self.for_each_video_item(|vid| vid.play());  }
+    fn pause_video(&self) { self.for_each_video_item(|vid| vid.pause()); }
 
     fn seek_to_frame(&self, frame: i64, exact: bool) {
-        if let Some(vid) = self.video_item() { unsafe { &mut *vid.as_ptr() }.seekToFrame(frame, exact); }
+        self.for_each_video_item(|vid| vid.seekToFrame(frame, exact));
     }
     fn seek_to_frame_delta(&self, delta: i64) {
-        if let Some(vid) = self.video_item() { unsafe { &mut *vid.as_ptr() }.seekToFrameDelta(delta); }
+        self.for_each_video_item(|vid| vid.seekToFrameDelta(delta));
     }
     fn set_video_timestamp(&self, ms: f64) {
-        if let Some(vid) = self.video_item() { unsafe { &mut *vid.as_ptr() }.setTimestamp(ms); }
+        self.for_each_video_item(|vid| vid.setTimestamp(ms));
     }
     fn set_video_frame_rate(&self, fps: f64) {
-        if let Some(vid) = self.video_item() { unsafe { &mut *vid.as_ptr() }.setFrameRate(fps); }
+        self.for_each_video_item(|vid| vid.setFrameRate(fps));
     }
     fn set_video_playback_range(&self, from_ms: i64, to_ms: i64) {
-        if let Some(vid) = self.video_item() { unsafe { &mut *vid.as_ptr() }.setPlaybackRange(from_ms, to_ms); }
+        self.for_each_video_item(|vid| vid.setPlaybackRange(from_ms, to_ms));
     }
     fn force_video_redraw(&self) {
-        if let Some(vid) = self.video_item() {
-            unsafe { &mut *vid.as_ptr() }.forceRedraw();
-            // forceRedraw() only resets MDKPlayer's internal bookkeeping — it doesn't request a
-            // frame. Without this, windowBeforeRendering() (and therefore render()/process_pixels)
-            // never fires again once Qt Quick's render loop goes idle (e.g. video paused, only a
-            // keyframe changing), which is exactly what caused the viewport to intermittently stop
-            // updating mid-drag.
-            qrhi_undistort::mdk_request_window_update(self.vid_ptr.load(SeqCst));
+        self.for_each_video_item(|vid| vid.forceRedraw());
+        // forceRedraw() only resets MDKPlayer's internal bookkeeping — it doesn't request a
+        // frame. Without this, windowBeforeRendering() (and therefore render()/process_pixels)
+        // never fires again once Qt Quick's render loop goes idle (e.g. video paused, only a
+        // keyframe changing), which is exactly what caused the viewport to intermittently stop
+        // updating mid-drag.
+        for lens in 0..2 {
+            let ptr = self.vid_ptr_for(lens).load(SeqCst);
+            if ptr != 0 { qrhi_undistort::mdk_request_window_update(ptr); }
         }
     }
     /// Replaces the old generic `vid.setProperty("scale", ...)` calls — this codebase only
     /// ever used that with the literal key "scale", so it's exposed narrowly rather than as
-    /// a passthrough for an arbitrary property name.
+    /// a passthrough for an arbitrary property name. Lens 0 only - UI/display concern, lens 1
+    /// has no display of its own.
     fn set_video_scale(&self, scale: QString) {
         if let Some(vid) = self.video_item() { unsafe { &mut *vid.as_ptr() }.setProperty(QString::from("scale"), scale); }
     }
+    /// Lens 0 only - audio playback isn't part of the dual-lens secondary's role.
     fn set_video_volume(&self, v: f32) {
         if let Some(vid) = self.video_item() { unsafe { &mut *vid.as_ptr() }.setVolume(v); }
     }
@@ -1512,13 +1632,14 @@ impl Controller {
     /// synchronously in the setter. playbackRate has no NOTIFY signal on MDKVideoItem, so it's
     /// the one exception: updated directly here, since nothing else will ever do it.
     fn set_video_current_frame(&mut self, frame: i64) {
-        if let Some(vid) = self.video_item() { unsafe { &mut *vid.as_ptr() }.setCurrentFrame(frame); }
+        self.for_each_video_item(|vid| vid.setCurrentFrame(frame));
     }
+    /// Lens 0 only - audio playback isn't part of the dual-lens secondary's role.
     fn set_video_muted(&mut self, v: bool) {
         if let Some(vid) = self.video_item() { unsafe { &mut *vid.as_ptr() }.setMuted(v); }
     }
     fn set_video_playback_rate(&mut self, v: f32) {
-        if let Some(vid) = self.video_item() { unsafe { &mut *vid.as_ptr() }.setPlaybackRate(v); }
+        self.for_each_video_item(|vid| vid.setPlaybackRate(v));
         self.video_playback_rate = v;
         self.video_playback_rate_changed();
     }
@@ -1536,6 +1657,9 @@ impl Controller {
 
     fn on_video_metadata_loaded(&mut self, md: QJsonObject) {
         self.video_metadata_loaded(md);
+    }
+    fn on_video2_metadata_loaded(&mut self, md: QJsonObject) {
+        self.video2_metadata_loaded(md);
     }
     fn on_video_metadata_changed(&mut self) {
         if let Some(vid) = self.video_item() {

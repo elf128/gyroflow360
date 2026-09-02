@@ -301,18 +301,30 @@ pub fn create_mdk_source(container: &qmetaobject::QJSValue) -> usize {
 /// require either side's metaobject to have been produced by moc (neither is; both are
 /// qmetaobject-rs generated), only that the lookup succeeds, which it does because QML's own
 /// native property bindings already rely on the exact same lookup mechanism today.
-pub fn wire_video_signals(item_ptr: usize, controller_ptr: usize) {
+/// Lens 0 gets the full set - it drives all of Controller's video_* properties. Lens 1 only
+/// gets metadataLoaded wired, forwarded to on_video2_metadata_loaded - that's the one signal
+/// VideoInformation.qml's secondary-lens info section needs (see Controller::init_video_source);
+/// lens 1 has no play/pause/seek-driven UI properties of its own to mirror the rest for.
+pub fn wire_video_signals(item_ptr: usize, controller_ptr: usize, lens: i32) {
     if item_ptr == 0 || controller_ptr == 0 { return; }
-    cpp!(unsafe [item_ptr as "uintptr_t", controller_ptr as "uintptr_t"] {
-        auto *item = reinterpret_cast<QObject *>(item_ptr);
-        auto *ctrl = reinterpret_cast<QObject *>(controller_ptr);
-        QObject::connect(item, SIGNAL(metadataLoaded(QJsonObject)), ctrl, SLOT(on_video_metadata_loaded(QJsonObject)));
-        QObject::connect(item, SIGNAL(metadataChanged()),            ctrl, SLOT(on_video_metadata_changed()));
-        QObject::connect(item, SIGNAL(currentFrameChanged()),        ctrl, SLOT(on_video_current_frame_changed()));
-        QObject::connect(item, SIGNAL(timestampChanged()),           ctrl, SLOT(on_video_timestamp_changed()));
-        QObject::connect(item, SIGNAL(playingChanged()),             ctrl, SLOT(on_video_playing_changed()));
-        QObject::connect(item, SIGNAL(mutedChanged()),                ctrl, SLOT(on_video_muted_changed()));
-    });
+    if lens == 0 {
+        cpp!(unsafe [item_ptr as "uintptr_t", controller_ptr as "uintptr_t"] {
+            auto *item = reinterpret_cast<QObject *>(item_ptr);
+            auto *ctrl = reinterpret_cast<QObject *>(controller_ptr);
+            QObject::connect(item, SIGNAL(metadataLoaded(QJsonObject)), ctrl, SLOT(on_video_metadata_loaded(QJsonObject)));
+            QObject::connect(item, SIGNAL(metadataChanged()),            ctrl, SLOT(on_video_metadata_changed()));
+            QObject::connect(item, SIGNAL(currentFrameChanged()),        ctrl, SLOT(on_video_current_frame_changed()));
+            QObject::connect(item, SIGNAL(timestampChanged()),           ctrl, SLOT(on_video_timestamp_changed()));
+            QObject::connect(item, SIGNAL(playingChanged()),             ctrl, SLOT(on_video_playing_changed()));
+            QObject::connect(item, SIGNAL(mutedChanged()),                ctrl, SLOT(on_video_muted_changed()));
+        });
+    } else {
+        cpp!(unsafe [item_ptr as "uintptr_t", controller_ptr as "uintptr_t"] {
+            auto *item = reinterpret_cast<QObject *>(item_ptr);
+            auto *ctrl = reinterpret_cast<QObject *>(controller_ptr);
+            QObject::connect(item, SIGNAL(metadataLoaded(QJsonObject)), ctrl, SLOT(on_video2_metadata_loaded(QJsonObject)));
+        });
+    }
 }
 
 /// Destroy a previously-created MDK source. `QQuickItem::deleteLater()` triggers Qt Quick's

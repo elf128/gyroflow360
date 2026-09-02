@@ -14,12 +14,14 @@ mod compute_params;
 mod frame_transform;
 mod cpu_undistort;
 mod pixel_formats;
+mod dual_lens_sync;
 // mod interpolation;
 pub mod distortion_models;
 pub use pixel_formats::*;
 pub use compute_params::ComputeParams;
 pub use frame_transform::FrameTransform;
 pub use cpu_undistort::*;
+pub use dual_lens_sync::{ DualLensFrameSync, LensFrame, Consumer as DualLensConsumer };
 
 #[derive(Default, Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Interpolation {

@@ -1,63 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright © 2024
 
-use ffmpeg_next::{ codec, format, frame, media, software::scaling };
-
-pub struct SecondaryVideoSource {
-    input:        format::context::Input,
-    decoder:      codec::decoder::Video,
-    stream_index: usize,
-}
+/// Namespace for deriving a dual-lens camera's secondary file path from its primary file's
+/// path. The secondary file itself is loaded and decoded through a real MDKVideoItem now
+/// (see Controller::load_secondary_video/init_video_source) - this module only ever answers
+/// "what path should that be", never touches a decoder.
+pub struct SecondaryVideoSource;
 
 impl SecondaryVideoSource {
-    pub fn open(path: &str) -> Result<Self, ffmpeg_next::Error> {
-        let input = format::input(&path)?;
-        let stream = input.streams().best(media::Type::Video)
-            .ok_or(ffmpeg_next::Error::StreamNotFound)?;
-        let stream_index = stream.index();
-        let decoder = codec::context::Context::from_parameters(stream.parameters())?
-            .decoder()
-            .video()?;
-        Ok(Self { input, decoder, stream_index })
-    }
-
-    /// Decode and return the next video frame. Returns None at EOF.
-    pub fn next_frame(&mut self) -> Option<frame::Video> {
-        loop {
-            let mut frame = frame::Video::empty();
-            if self.decoder.receive_frame(&mut frame).is_ok() {
-                return Some(frame);
-            }
-            // Feed more packets until we get a frame or hit EOF
-            let (stream, packet) = self.input.packets().find(|(s, _)| s.index() == self.stream_index)?;
-            let _ = stream; // suppress unused warning
-            if self.decoder.send_packet(&packet).is_err() {
-                return None;
-            }
-        }
-    }
-
-    /// Seek to the closest keyframe at or before `timestamp_us` (AV_TIME_BASE = µs), then flush.
-    pub fn seek_to_us(&mut self, timestamp_us: i64) -> bool {
-        // ffmpeg_next expects timestamps in AV_TIME_BASE (= 1 000 000 ticks / second = µs).
-        let ok = self.input.seek(timestamp_us, ..timestamp_us).is_ok();
-        self.decoder.flush();
-        ok
-    }
-
-    /// Decode the next frame and return it scaled to `(target_w, target_h)` as packed RGBA8.
-    pub fn next_frame_as_rgba8(&mut self, target_w: u32, target_h: u32) -> Option<Vec<u8>> {
-        let frame = self.next_frame()?;
-        let mut scaler = scaling::Context::get(
-            frame.format(), frame.width(), frame.height(),
-            format::Pixel::RGBA, target_w, target_h,
-            scaling::Flags::BILINEAR,
-        ).ok()?;
-        let mut rgba = frame::Video::empty();
-        scaler.run(&frame, &mut rgba).ok()?;
-        Some(rgba.data(0).to_vec())
-    }
-
     /// Derive the secondary file path from the primary using camera-aware rules.
     /// Tries each rule in order and returns the first path that exists on disk.
     pub fn pair_path(primary: &str) -> Option<String> {

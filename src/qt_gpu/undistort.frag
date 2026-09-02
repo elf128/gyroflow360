@@ -12,6 +12,11 @@ layout(location = 0) in vec2 v_texcoord;
 layout(location = 0) out vec4 fragColor;
 
 layout(binding = 1) uniform sampler2D texIn;
+// Lens 2 input (dual-lens only). Bound to a 1x1 black dummy texture when inactive,
+// so this declaration and binding are always present - no shader/pipeline branching.
+// Not sampled yet - wired in a follow-up once the lens2 KernelParams fields and blend
+// math are in place.
+layout(binding = 6) uniform sampler2D texIn2;
 
 layout(std140, binding = 2) uniform KernelParams
 {
@@ -68,6 +73,34 @@ layout(std140, binding = 2) uniform KernelParams
 
     vec4 ewa_coefs_p;               // 16
     vec4 ewa_coefs_q;               // 16
+
+    // Dual lens (Phase 1) — must match stabilization::KernelParams layout exactly
+    // (see wgpu_undistort.wgsl, which this mirrors field-for-field).
+    // vec3 has 16-byte alignment in std140 but [f32; 3] is 12 bytes in packed(4) Rust,
+    // so axes and rotation rows are stored as individual scalars to keep the two
+    // layouts byte-identical without inserting padding fields on the Rust side.
+    vec2 f2;                  // 8  - focal length for lens 2
+    vec2 c2;                  // 16 - lens center for lens 2
+    vec4 k2_1, k2_2, k2_3;    // 16, 16, 16 - distortion coefficients for lens 2
+
+    int distortion_model2;    // 4
+    float lens1_axis_x;       // 8  \
+    float lens1_axis_y;       // 12  | optical axis of lens 1 in world space (typically [0,0,1])
+    float lens1_axis_z;       // 16 /
+
+    float lens2_axis_x;       // 4  \
+    float lens2_axis_y;       // 8   | optical axis of lens 2 in world space (typically [0,0,-1])
+    float lens2_axis_z;       // 12 /
+    float seam_blend_radians; // 16 - angular half-width of the blend zone
+
+    // lens2_rotation [f32; 9]: fixed rotation matrix, camera-1 (world) space → camera-2
+    // optical space. Computed once per frame (not per scanline) in frame_transform.rs. Row-major.
+    float lens2_rot_00, lens2_rot_01, lens2_rot_02, lens2_rot_10; // 16
+    float lens2_rot_11, lens2_rot_12, lens2_rot_20, lens2_rot_21; // 16
+    float lens2_rot_22;       // 4
+    float reserved3;          // 8
+    float reserved4;          // 12
+    float reserved5;          // 16
 } params;
 
 LENS_MODEL_FUNCTIONS;
@@ -163,7 +196,7 @@ float map_coord(float x, float in_min, float in_max, float out_min, float out_ma
     return ( x - in_min) * (out_max - out_min) / ( in_max - in_min ) + out_min;
 }
 
-vec2 rotate_and_distort(vec2 pos, float idx)
+vec3 rotate( vec2 pos, float idx )
 {
     // Row-major 4×4 stored in texels 0–15; build GLSL column-major mat4.
     mat4 M = mat4(
@@ -173,8 +206,11 @@ vec2 rotate_and_distort(vec2 pos, float idx)
         get_param(idx,  3), get_param(idx,  7), get_param(idx, 11), get_param(idx, 15)
     );
     // Input: output pixel (pos.xy), homogeneous W=1, unit depth Z=1.
-    vec4 _pos = M * vec4(pos, 1.0, 1.0);
+    return ( M * vec4(pos, 1.0, 1.0) ).xyz;
+}
 
+vec2 distort( vec3 pos, float idx )
+{
     // Per-row IBIS/OIS corrections stored at texels 16–20.
     float sx = get_param(idx, 16);
     float sy = get_param(idx, 17);
@@ -182,7 +218,7 @@ vec2 rotate_and_distort(vec2 pos, float idx)
     float ox = get_param(idx, 19);
     float oy = get_param(idx, 20);
 
-    if ( params.r_limit > 0.0 && atan(length(vec2(_pos.x, _pos.y)), _pos.z) > atan(params.r_limit) )
+    if ( params.r_limit > 0.0 && atan(length(vec2(pos.x, pos.y)), pos.z) > atan(params.r_limit) )
     {
         return vec2( -99999.0, -99999.0 );
     }
@@ -190,18 +226,19 @@ vec2 rotate_and_distort(vec2 pos, float idx)
     if ( params.light_refraction_coefficient != 1.0 &&
          params.light_refraction_coefficient > 0.0 )
     {
-        float r_xy      = length(vec2(_pos.x, _pos.y));
-        float sin_theta   = sin(atan(r_xy, _pos.z));
+        float r_xy        = length( vec2( pos.x, pos.y) );
+        float sin_theta   = sin( atan( r_xy, pos.z ) );
         float sin_theta_d = sin_theta * params.light_refraction_coefficient;
-        if (sin_theta < 1.0 && sin_theta_d < 1.0)
+        if ( sin_theta < 1.0 && sin_theta_d < 1.0 )
         {
-            float r   = sin_theta   / sqrt(1.0 - sin_theta   * sin_theta);
-            float r_d = sin_theta_d / sqrt(1.0 - sin_theta_d * sin_theta_d);
-            if (r_d != 0.0) { _pos.z *= r / r_d; }
+            float r   = sin_theta   / sqrt( 1.0 - sin_theta   * sin_theta );
+            float r_d = sin_theta_d / sqrt( 1.0 - sin_theta_d * sin_theta_d );
+            if (r_d != 0.0)
+                pos.z *= r / r_d;
         }
     }
 
-    vec2 uv = params.f * distort_point(_pos.x, _pos.y, _pos.z) + params.c;
+    vec2 uv = params.f * distort_point(pos, params.k1, params.k2, params.k3) + params.c;
 
     if ( sx != 0.0 || sy != 0.0 || ra != 0.0 || ox != 0.0 || oy != 0.0 )
     {
@@ -216,10 +253,9 @@ vec2 rotate_and_distort(vec2 pos, float idx)
     }
     uv = process_coord(uv, idx);
 
-    if (bool(params.flags & 2))
-    { // Has digital lens
+    // Has digital lens
+    if ( (params.flags & 2) != 0 )
         uv = digital_distort_point(uv);
-    }
 
     if ( params.input_horizontal_stretch > 0.001 )
         uv.x /= params.input_horizontal_stretch;
@@ -336,7 +372,8 @@ void main()
     if (params.matrix_count > 1)
     {
         float idx = params.matrix_count / 2.0; // Use middle matrix
-        vec2 uv = rotate_and_distort(texPos, idx);
+        vec3 v  = rotate(texPos, idx);
+        vec2 uv = distort(v, idx);
         if (uv.x > -99998.0)
         {
             if (bool(params.flags & 16))
@@ -354,8 +391,11 @@ void main()
 
     float idx = clamp(sy, 0.0, params.matrix_count - 1.0);
 
-    vec2 uv = rotate_and_distort(texPos, idx);
+    vec3 v  = rotate(texPos, idx);
+    vec2 uv = distort(v, idx);
     vec2 frame_size = vec2(params.width, params.height);
+    // NOTE: input rotation will be busted in dual-lens case.
+    // It is expected this number is always 0 for dual-lens.
     if (params.input_rotation != 0.0)
     {
         float rotation = params.input_rotation * (3.1415926535897 / 180.0);
@@ -421,6 +461,7 @@ void main()
               ( uv.y >= 0 && uv.y < frame_size.y) )
         {
             fragColor = texture(texIn, vec2(uv.x / frame_size.x, uv.y / frame_size.y));
+
             draw_pixel(fragColor, uv.x, uv.y, true);
             draw_pixel(fragColor, outPos.x, outPos.y, false);
             draw_safe_area(fragColor, outPos.x, outPos.y);

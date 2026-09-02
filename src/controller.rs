@@ -1285,6 +1285,7 @@ impl Controller {
             let preview_pipeline = self.preview_pipeline.clone();
             let viewport_ptr = self.viewport_ptr.clone();
             let primary_vid_ptr = self.vid_ptr.clone();
+            let secondary_vid_ptr = self.vid2_ptr.clone();
             let update_info = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, (fov, minimal_fov, focal_length, info): (f64, f64, Option<f64>, QString)| {
                 this.current_fov = fov;
                 this.current_minimal_fov = minimal_fov;
@@ -1306,14 +1307,14 @@ impl Controller {
                     // exactly as before unification - this must stay unconditional so
                     // force_video_redraw() (same frame index, changed keyframe) still works.
                     stab.dual_lens_sync.try_consume(DualLensConsumer::Texture, frame as i64);
-                    Self::process_texture_frame(&stab, &viewport_ptr, &preview_pipeline, &update_info2, &primary_vid_ptr, frame, timestamp_ms, width, height, backend_id, ptr1, ptr2, ptr3, ptr4, ptr5)
+                    Self::process_texture_frame(&stab, &viewport_ptr, &preview_pipeline, &update_info2, &primary_vid_ptr, &secondary_vid_ptr, frame, timestamp_ms, width, height, backend_id, ptr1, ptr2, ptr3, ptr4, ptr5)
                 } else {
                     // Secondary tick: opportunistically drive the same render step from lens
                     // 0's latched frame, only if lens 0's own tick hasn't already done so this
                     // same frame index (the common case - lens 0 fires first, same window tick).
                     if let Some((frame_idx0, LensFrame::Texture { backend_id: b0, ptr1: p1, ptr2: p2, ptr3: p3, ptr4: p4, ptr5: p5, width: w0, height: h0 })) = stab.dual_lens_sync.latest(0) {
                         if stab.dual_lens_sync.try_consume(DualLensConsumer::Texture, frame_idx0) {
-                            Self::process_texture_frame(&stab, &viewport_ptr, &preview_pipeline, &update_info2, &primary_vid_ptr, frame_idx0 as u32, timestamp_ms, w0, h0, b0, p1, p2, p3, p4, p5);
+                            Self::process_texture_frame(&stab, &viewport_ptr, &preview_pipeline, &update_info2, &primary_vid_ptr, &secondary_vid_ptr, frame_idx0 as u32, timestamp_ms, w0, h0, b0, p1, p2, p3, p4, p5);
                         }
                     }
                     preview_pipeline.load(SeqCst) <= 1
@@ -1355,6 +1356,7 @@ impl Controller {
         preview_pipeline: &Arc<AtomicUsize>,
         update_info2: &F,
         primary_vid_ptr: &Arc<AtomicUsize>,
+        secondary_vid_ptr: &Arc<AtomicUsize>,
         frame: u32, timestamp_ms: f64, width: u32, height: u32, backend_id: u32,
         ptr1: u64, ptr2: u64, ptr3: u64, ptr4: u64, ptr5: u64,
     ) -> bool {
@@ -1383,7 +1385,17 @@ impl Controller {
             if primary_ptr == 0 { return true; }
             let vid0 = unsafe { &mut *MDKVideoItem::get_from_cpp(primary_ptr as *mut std::ffi::c_void).as_ptr() };
 
-            if let Some(ret) = qrhi_undistort::render(vid0.get_mdkplayer(), vp, timestamp_ms, frame as usize, width, height, stab.clone(), &mut buffers) {
+            // Lens 2 is optional - only present once a dual-lens profile's secondary
+            // file has been loaded (see Controller::init_video_source).
+            let secondary_ptr = secondary_vid_ptr.load(SeqCst);
+            let vid1 = if secondary_ptr != 0 {
+                Some(unsafe { &mut *MDKVideoItem::get_from_cpp(secondary_ptr as *mut std::ffi::c_void).as_ptr() })
+            } else {
+                None
+            };
+            let mdkplayer2 = vid1.map(|v| v.get_mdkplayer());
+
+            if let Some(ret) = qrhi_undistort::render(vid0.get_mdkplayer(), mdkplayer2, vp, timestamp_ms, frame as usize, width, height, stab.clone(), &mut buffers) {
                 update_info2((ret.fov, ret.minimal_fov, ret.focal_length, QString::from(format!("Processing {}x{} using {} took {:.2}ms", width, height, ret.backend, _time.elapsed().as_micros() as f64 / 1000.0))));
             } else {
                 update_info2((1.0, 1.0, None, QString::from("---")));

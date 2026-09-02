@@ -68,10 +68,10 @@ vec2 undistort_point(vec2 pos) {
     return vec2(0.0, 0.0);
 }
 
-vec2 distort_point(float x, float y, float z) {
-    if (z <= 0.0) return vec2(-99999.0, -99999.0);
-    vec2 pos = vec2(x, y) / z;
-    if (params.k1 == vec4(0.0) && params.k2 == vec4(0.0) && params.k3 == vec4(0.0)) return pos;
+vec2 distort_point(vec3 dir, vec4 k1, vec4 k2, vec4 k3) {
+    if (dir.z <= 0.0) return vec2(-99999.0, -99999.0);
+    vec2 pos = dir.xy / dir.z;
+    if (k1 == vec4(0.0) && k2 == vec4(0.0) && k3 == vec4(0.0)) return pos;
 
     float r = length(pos);
     float theta = atan(r);
@@ -88,18 +88,18 @@ vec2 distort_point(float x, float y, float z) {
           theta11 = theta5*theta6,
           theta12 = theta6*theta6;
 
-    float theta_d = theta   * params.k1.x
-                  + theta2  * params.k1.y
-                  + theta3  * params.k1.z
-                  + theta4  * params.k1.w
-                  + theta5  * params.k2.x
-                  + theta6  * params.k2.y
-                  + theta7  * params.k2.z
-                  + theta8  * params.k2.w
-                  + theta9  * params.k3.x
-                  + theta10 * params.k3.y
-                  + theta11 * params.k3.z
-                  + theta12 * params.k3.w;
+    float theta_d = theta   * k1.x
+                  + theta2  * k1.y
+                  + theta3  * k1.z
+                  + theta4  * k1.w
+                  + theta5  * k2.x
+                  + theta6  * k2.y
+                  + theta7  * k2.z
+                  + theta8  * k2.w
+                  + theta9  * k3.x
+                  + theta10 * k3.y
+                  + theta11 * k3.z
+                  + theta12 * k3.w;
 
     float scale = r == 0? 1.0 : theta_d / r;
 

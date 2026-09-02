@@ -72,6 +72,7 @@ public:
     QSize texSize() { return m_textureSize; }
     QString shaderPath() { return m_shaderPath; }
     QRhiTexture *itemTexturePtr() { return m_itemTexturePtr; }
+    QRhiTexture *itemTexturePtr2() { return m_itemTexturePtr2; }
     unsigned int sizeForRS() { return m_sizeForRS; }
     QRhiTextureRenderTarget *externalRT() { return m_externalRT; }
 
@@ -396,7 +397,7 @@ public:
         return getShader(tmpQsb);
     }
 
-    bool init(MDKPlayer *item, GyroflowViewport *viewport, QSize textureSize, QSize outputSize, const QString &shaderPath,
+    bool init(MDKPlayer *item, MDKPlayer *item2, GyroflowViewport *viewport, QSize textureSize, QSize outputSize, const QString &shaderPath,
               const QString &distortionModel, const QString &digitalLens,
               int kernelParmsSize, unsigned int sizeForRS, QSize canvasSize) {
         if (!item || !viewport) return false;
@@ -404,11 +405,13 @@ public:
         auto rhi = context->rhi();
 
         m_item = item;
+        m_item2 = item2;
         m_sizeForRS = sizeForRS;
         m_outputSize = outputSize;
         m_textureSize = textureSize;
         m_shaderPath = shaderPath;
         m_itemTexturePtr = item->rhiTexture();
+        m_itemTexturePtr2 = item2 ? item2->rhiTexture() : nullptr;
         m_distortionModel = distortionModel;
         m_digitalLens = digitalLens;
         m_kernelParmsSize = kernelParmsSize;
@@ -449,6 +452,11 @@ public:
         m_texCanvas.reset(rhi->newTexture(QRhiTexture::R8, canvasSize, 1, QRhiTexture::Flags()));
         if (!m_texCanvas->create()) { qDebug2("init") << "failed to create m_texCanvas"; return false; }
 
+        // Bound at binding 6 whenever lens 2 isn't loaded, so the pipeline/shader
+        // resource bindings never need to branch on whether dual-lens is active.
+        m_texIn2Dummy.reset(rhi->newTexture(QRhiTexture::RGBA8, QSize(1, 1), 1, QRhiTexture::Flags()));
+        if (!m_texIn2Dummy->create()) { qDebug2("init") << "failed to create m_texIn2Dummy"; return false; }
+
         m_vertexBuffer.reset(rhi->newBuffer(QRhiBuffer::Immutable, QRhiBuffer::VertexBuffer, sizeof(quadVertexData)));
         if (!m_vertexBuffer->create()) { qDebug2("init") << "failed to create m_vertexBuffer"; return false; }
 
@@ -471,6 +479,11 @@ public:
         m_meshDataSampler.reset(rhi->newSampler(QRhiSampler::Nearest, QRhiSampler::Nearest, QRhiSampler::None, QRhiSampler::ClampToEdge, QRhiSampler::ClampToEdge));
         if (!m_meshDataSampler->create()) { qDebug2("init") << "failed to create m_meshDataSampler"; return false; }
 
+        // item2->rhiTexture() can briefly be null even when item2 itself is non-null (its
+        // decoder hasn't produced a first frame yet) - fall back to the dummy in that case too,
+        // same as when dual-lens isn't active at all.
+        QRhiTexture *tex2 = (item2 && item2->rhiTexture()) ? item2->rhiTexture() : m_texIn2Dummy.get();
+
         m_srb.reset(rhi->newShaderResourceBindings());
         m_srb->setBindings({
             QRhiShaderResourceBinding::uniformBuffer (0, QRhiShaderResourceBinding::FragmentStage | QRhiShaderResourceBinding::VertexStage, m_drawingUniform.get()),
@@ -479,6 +492,7 @@ public:
             QRhiShaderResourceBinding::sampledTexture(3, QRhiShaderResourceBinding::FragmentStage, m_texMatrices.get(), m_matricesSampler.get()),
             QRhiShaderResourceBinding::sampledTexture(4, QRhiShaderResourceBinding::FragmentStage, m_texCanvas.get(), m_canvasSampler.get()),
             QRhiShaderResourceBinding::sampledTexture(5, QRhiShaderResourceBinding::FragmentStage, m_texMeshData.get(), m_meshDataSampler.get()),
+            QRhiShaderResourceBinding::sampledTexture(6, QRhiShaderResourceBinding::FragmentStage, tex2, m_drawingSampler.get()),
         });
         if (!m_srb->create()) { qDebug2("init") << "failed to create m_srb"; return false; }
 
@@ -539,6 +553,9 @@ public:
         m_initialUpdates->uploadStaticBuffer(m_vertexBuffer.get(), quadVertexData);
         m_initialUpdates->uploadStaticBuffer(m_indexBuffer.get(), quadIndexData);
         m_initialUpdates->updateDynamicBuffer(m_drawingUniform.get(), 64, 4, &flip);
+        static const uint8_t blackPixel[4] = { 0, 0, 0, 0 };
+        QRhiTextureSubresourceUploadDescription dummyDesc(blackPixel, sizeof(blackPixel));
+        m_initialUpdates->uploadTexture(m_texIn2Dummy.get(), QRhiTextureUploadDescription({ QRhiTextureUploadEntry(0, 0, dummyDesc) }));
 
         // Return true even with a null pipeline: instance stays alive so the watcher
         // can call reinit() when the shader is fixed, without Rust destroying us.
@@ -624,6 +641,7 @@ public:
     }
 
     QRhiTexture *m_itemTexturePtr{nullptr};
+    QRhiTexture *m_itemTexturePtr2{nullptr};
 
     // External render target — owned by GyroflowViewport, not by this class.
     QRhiTextureRenderTarget  *m_externalRT   {nullptr};
@@ -633,6 +651,7 @@ public:
     QScopedPointer<QRhiTexture> m_texCanvas;
     QScopedPointer<QRhiBuffer> m_kernelParams;
     QScopedPointer<QRhiTexture> m_texMeshData;
+    QScopedPointer<QRhiTexture> m_texIn2Dummy; // bound at binding 6 when lens 2 isn't active
 
     QSize m_outputSize;
     QSize m_textureSize;
@@ -640,6 +659,7 @@ public:
     unsigned int m_sizeForRS{0};
 
     MDKPlayer *m_item{nullptr};
+    MDKPlayer *m_item2{nullptr}; // lens 2, optional (dual-lens only)
     int m_kernelParmsSize{0};
     QSize m_canvasSize;
     bool m_hadFirstRender{false};

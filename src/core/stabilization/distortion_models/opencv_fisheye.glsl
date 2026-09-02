@@ -45,16 +45,16 @@ vec2 undistort_point(vec2 pos) {
     return vec2(0.0, 0.0);
 }
 
-vec2 distort_point(float x, float y, float z) {
-    float r = length(vec2(x, y));
-    float theta = atan(r, z);
+vec2 distort_point(vec3 dir, vec4 k1, vec4 k2, vec4 k3) {
+    float r = length(dir.xy);
+    float theta = atan(r, dir.z);
     float theta2 = theta*theta,
           theta4 = theta2*theta2,
           theta6 = theta4*theta2,
           theta8 = theta4*theta4;
 
-    float theta_d = theta * (1.0 + dot(params.k1, vec4(theta2, theta4, theta6, theta8)));
+    float theta_d = theta * (1.0 + dot(k1, vec4(theta2, theta4, theta6, theta8)));
 
     float scale = r == 0.0 ? 1.0 : theta_d / r;
-    return vec2(x, y) * scale;
+    return dir.xy * scale;
 }

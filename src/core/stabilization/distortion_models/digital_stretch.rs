@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright © 2022 Adrian <adrian.eddy at gmail>
 
-use crate::{ stabilization::KernelParams, lens_profile::LensProfile };
+use crate::{ stabilization::KernelParams, lens_profile::LensParams };
 
 #[derive(Default, Clone)]
 pub struct DigitalStretch { }
@@ -20,7 +20,7 @@ impl DigitalStretch {
         (x * params.digital_lens_params[0],
          y * params.digital_lens_params[1])
     }
-    pub fn adjust_lens_profile(&self, _profile: &mut LensProfile) {
+    pub fn adjust_lens_profile(&self, _lens: &mut LensParams) {
         // TODO
     }
     pub fn distortion_derivative(&self, _theta: f64, _k: &[f64]) -> Option<f64> {

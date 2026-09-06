@@ -3,7 +3,7 @@
 
 // See https://github.com/gyroflow/gyroflow/issues/43 for research details
 
-use crate::{ stabilization::KernelParams, lens_profile::LensProfile };
+use crate::{ stabilization::KernelParams, lens_profile::LensParams };
 
 #[derive(Default, Clone)]
 pub struct GoProSuperview { }
@@ -56,12 +56,12 @@ impl GoProSuperview {
         ((pp.0 + 0.5) * size.0,
          (pp.1 + 0.5) * size.1)
     }
-    pub fn adjust_lens_profile(&self, profile: &mut LensProfile) {
-        let aspect = (profile.calib_dimension.w as f64 / profile.calib_dimension.h as f64 * 100.0) as usize;
+    pub fn adjust_lens_profile(&self, lens: &mut LensParams) {
+        let aspect = (lens.calib_dimension.w as f64 / lens.calib_dimension.h as f64 * 100.0) as usize;
         if aspect == 133 { // It's 4:3
-            profile.calib_dimension.w = (profile.calib_dimension.w as f64 * 1.3333333333333).round() as usize;
+            lens.calib_dimension.w = (lens.calib_dimension.w as f64 * 1.3333333333333).round() as usize;
         }
-        profile.lens_model = "Superview".into();
+        lens.lens_model = "Superview".into();
     }
     pub fn distortion_derivative(&self, _theta: f64, _k: &[f64]) -> Option<f64> {
         None

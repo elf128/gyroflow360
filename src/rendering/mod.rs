@@ -229,7 +229,7 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
 
     drop(params);
 
-    let lens_checksum = stab.lens.read().checksum.clone();
+    let lens_checksum = stab.profile.read().checksum.clone();
 
     let mut decoder_options = ffmpeg_next::Dictionary::new();
     if input_file.image_sequence_fps > 0.0 {

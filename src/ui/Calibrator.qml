@@ -131,6 +131,12 @@ Window {
             ui_tools.init_calibrator();
             Qt.callLater(() => {
                 controller.init_video_source(videoArea.mdkSourceContainer, 0);
+                // init_calibrator() above just replaced the whole Controller, so its
+                // viewport_ptr is fresh/unset - reconnect it to the viewport already
+                // parented into gyroflowViewportContainer by whichever controller created
+                // it first (create_viewport reuses the existing one instead of duplicating).
+                controller.init_viewport(videoArea.gyroflowViewportContainer);
+                controller.set_viewport_display_size(videoArea.gyroflowViewportContainer.width, videoArea.gyroflowViewportContainer.height);
                 Qt.callLater(() => {
                     videoArea.loadFile(file);
                 });

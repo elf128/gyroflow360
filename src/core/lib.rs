@@ -81,7 +81,10 @@ impl Default for SyncData {
 #[derive(Clone)]
 pub struct StabilizationManager {
     pub gyro: Arc<RwLock<GyroSource>>,
-    pub lens: Arc<RwLock<LensProfile>>,
+    /// The loaded lens profile - `profile.lens[0]` is the primary lens, `profile.lens[1]`
+    /// the secondary one for dual-lens setups. Named `profile` (not `lens`) specifically to
+    /// avoid `profile.lens.lens` chains at call sites.
+    pub profile: Arc<RwLock<LensProfile>>,
     pub smoothing: Arc<RwLock<Smoothing>>,
 
     pub stabilization: Arc<RwLock<Stabilization>>,
@@ -126,7 +129,7 @@ impl Default for StabilizationManager {
 
             stabilization: Arc::new(RwLock::new(Stabilization::default())),
             gyro: Arc::new(RwLock::new(GyroSource::new())),
-            lens: Arc::new(RwLock::new(LensProfile::default())),
+            profile: Arc::new(RwLock::new(LensProfile::default())),
 
             current_compute_id: Arc::new(AtomicU64::new(0)),
             smoothing_checksum: Arc::new(AtomicU64::new(0)),
@@ -211,7 +214,7 @@ impl StabilizationManager {
 
         if is_main_video {
             if let Some(ref lens) = md.lens_profile {
-                let mut l = self.lens.write();
+                let mut l = self.profile.write();
                 if let Some(lens_str) = lens.as_str() {
                     let mut db = self.lens_profile_db.read();
                     if !db.loaded {
@@ -283,38 +286,48 @@ impl StabilizationManager {
         };
         let db = self.lens_profile_db.read();
         let (result, from_db) = if let Some(lens) = db.get_by_id(&url) {
-            *self.lens.write() = lens.clone();
+            *self.profile.write() = lens.clone();
             (Ok(()), true)
         } else if url.starts_with('{') {
-            (self.lens.write().load_from_data(&url), false)
+            (self.profile.write().load_from_data(&url), false)
         } else {
-            (self.lens.write().load_from_file(&url), false)
+            (self.profile.write().load_from_file(&url), false)
         };
         let (width, height, aspect, id, fps) = {
             let params = self.params.read();
             (params.size.0, params.size.1, ((params.size.0 * 100) as f64 / params.size.1.max(1) as f64).round() as u32, self.camera_id.read().as_ref().map(|x| x.get_identifier_for_autoload()).unwrap_or_default(), (params.fps * 100.0).round() as i32)
         };
 
-        let mut lens = self.lens.write();
+        let mut lens = self.profile.write();
+
+        // Auto-detect/matching below only ever considers the primary lens (lens[0]) - a
+        // dual-lens profile's secondary file is paired separately (see load_secondary_video).
+        fn calib_dim(p: &LensProfile) -> crate::lens_profile::Dimensions {
+            p.lens.first().map(|l| l.calib_dimension.clone()).unwrap_or_default()
+        }
+        fn identifier(p: &LensProfile) -> String {
+            p.lens.first().map(|l| l.identifier.clone()).unwrap_or_default()
+        }
 
         // Check if the lens profile needs to be swapped for vertical
-        let lens_aspect_swapped = ((lens.calib_dimension.h * 100) as f64 / lens.calib_dimension.w.max(1) as f64).round() as u32;
-        if (width == lens.calib_dimension.h && height == lens.calib_dimension.w) || lens_aspect_swapped == aspect {
-            log::info!("Lens profile swapped from {}x{} to {}x{} to match the video aspect", lens.calib_dimension.w, lens.calib_dimension.h, lens.calib_dimension.h, lens.calib_dimension.w);
+        let dim = calib_dim(&lens);
+        let lens_aspect_swapped = ((dim.h * 100) as f64 / dim.w.max(1) as f64).round() as u32;
+        if (width == dim.h && height == dim.w) || lens_aspect_swapped == aspect {
+            log::info!("Lens profile swapped from {}x{} to {}x{} to match the video aspect", dim.w, dim.h, dim.h, dim.w);
             *lens = lens.swapped();
         }
 
         let matching = lens.get_all_matching_profiles();
         if matching.len() > 1 {
             let mut found = false;
-            if !id.is_empty() && lens.identifier == id {
+            if !id.is_empty() && identifier(&lens) == id {
                 found = true;
             }
             // Find best match for:
             if !found {
                 // 1. Identifier
                 for x in &matching {
-                    if !id.is_empty() && x.identifier == id {
+                    if !id.is_empty() && identifier(x) == id {
                         *lens = x.clone(); found = true; break;
                     }
                 }
@@ -322,7 +335,8 @@ impl StabilizationManager {
             if !found {
                 // 2. Resolution and fps
                 for x in &matching {
-                    if width == x.calib_dimension.w && height == x.calib_dimension.h && fps == (x.fps * 100.0).round() as i32 {
+                    let d = calib_dim(x);
+                    if width == d.w && height == d.h && fps == (x.fps * 100.0).round() as i32 {
                         *lens = x.clone(); found = true; break;
                     }
                 }
@@ -330,7 +344,8 @@ impl StabilizationManager {
             if !found {
                 // 3. Aspect ratio and fps
                 for x in &matching {
-                    let a = ((x.calib_dimension.w * 100) as f64 / x.calib_dimension.h.max(1) as f64).round() as u32;
+                    let d = calib_dim(x);
+                    let a = ((d.w * 100) as f64 / d.h.max(1) as f64).round() as u32;
                     if a == aspect && fps == (x.fps * 100.0).round() as i32 {
                         *lens = x.clone(); break;
                     }
@@ -339,7 +354,8 @@ impl StabilizationManager {
             if !found {
                 // 4. Resolution
                 for x in &matching {
-                    if width == x.calib_dimension.w && height == x.calib_dimension.h {
+                    let d = calib_dim(x);
+                    if width == d.w && height == d.h {
                         *lens = x.clone(); found = true; break;
                     }
                 }
@@ -347,7 +363,8 @@ impl StabilizationManager {
             if !found {
                 // 5. Aspect ratio
                 for x in &matching {
-                    let a = ((x.calib_dimension.w * 100) as f64 / x.calib_dimension.h.max(1) as f64).round() as u32;
+                    let d = calib_dim(x);
+                    let a = ((d.w * 100) as f64 / d.h.max(1) as f64).round() as u32;
                     if a == aspect {
                         *lens = x.clone(); break;
                     }
@@ -377,7 +394,7 @@ impl StabilizationManager {
 
         if w > 0 && ow > 0 && h > 0 && oh > 0 {
             self.stabilization.write().init_size((w, h), (ow, oh));
-            self.lens.write().optimal_fov = None;
+            if let Some(l) = self.profile.write().lens.first_mut() { l.optimal_fov = None; }
 
             self.invalidate_smoothing();
         }
@@ -999,8 +1016,8 @@ impl StabilizationManager {
     pub fn set_background_mode       (&self, v: i32)  { self.params.write().background_mode = stabilization_params::BackgroundMode::from(v); }
     pub fn set_background_margin     (&self, v: f64)  { self.params.write().background_margin = v; }
     pub fn set_background_margin_feather(&self, v: f64) { self.params.write().background_margin_feather = v; }
-    pub fn set_input_horizontal_stretch (&self, v: f64) { self.lens.write().input_horizontal_stretch = v; self.invalidate_zooming(); }
-    pub fn set_input_vertical_stretch   (&self, v: f64) { self.lens.write().input_vertical_stretch   = v; self.invalidate_zooming(); }
+    pub fn set_input_horizontal_stretch (&self, v: f64) { self.profile.write().primary_mut().input_horizontal_stretch = v; self.invalidate_zooming(); }
+    pub fn set_input_vertical_stretch   (&self, v: f64) { self.profile.write().primary_mut().input_vertical_stretch   = v; self.invalidate_zooming(); }
     pub fn set_max_zoom(&self, v: f64, iters: usize)  {
         let mut params = self.params.write();
         params.max_zoom = if v > 50.0 { Some(v) } else { None };
@@ -1019,8 +1036,9 @@ impl StabilizationManager {
 
     pub fn disable_lens_stretch(&self, adjust_size: bool) {
         let (x_stretch, y_stretch) = {
-            let lens = self.lens.read();
-            (lens.input_horizontal_stretch, lens.input_vertical_stretch)
+            let lens = self.profile.read();
+            let primary = lens.lens.first();
+            (primary.map(|l| l.input_horizontal_stretch).unwrap_or(0.0), primary.map(|l| l.input_vertical_stretch).unwrap_or(0.0))
         };
         if (x_stretch > 0.01 && x_stretch != 1.0) || (y_stretch > 0.01 && y_stretch != 1.0) {
             if adjust_size {
@@ -1029,9 +1047,10 @@ impl StabilizationManager {
                 params.size.1 = (params.size.1 as f64 * y_stretch).round() as usize;
             }
             {
-                let mut lens = self.lens.write();
-                lens.input_horizontal_stretch = 1.0;
-                lens.input_vertical_stretch = 1.0;
+                let mut lens = self.profile.write();
+                let primary = lens.primary_mut();
+                primary.input_horizontal_stretch = 1.0;
+                primary.input_vertical_stretch = 1.0;
             }
         }
     }
@@ -1054,7 +1073,7 @@ impl StabilizationManager {
     pub fn invalidate_blocking_undistortion(&self) { self.invalidate_ongoing_computations(); self.undistortion_invalidated.store(true, SeqCst); }
 
     pub fn set_digital_lens_name(&self, v: String) {
-        self.lens.write().digital_lens =  if !v.is_empty() { Some(v.clone()) } else { None };
+        self.profile.write().primary_mut().digital_lens =  if !v.is_empty() { Some(v.clone()) } else { None };
         #[cfg(feature = "opencv")]
         if let Some(ref mut calib) = *self.lens_calibrator.write() {
             calib.digital_lens = if !v.is_empty() { Some(v) } else { None };
@@ -1062,19 +1081,20 @@ impl StabilizationManager {
         self.invalidate_zooming();
     }
     pub fn set_digital_lens_param(&self, index: usize, value: f64) {
-        let mut lens = self.lens.write();
-        if lens.digital_lens_params.is_none() {
-            lens.digital_lens_params = Some(vec![0f64; 16]);
+        let mut lens = self.profile.write();
+        let primary = lens.primary_mut();
+        if primary.digital_lens_params.is_none() {
+            primary.digital_lens_params = Some(vec![0f64; 16]);
         }
-        lens.digital_lens_params.as_mut().unwrap()[index] = value;
+        primary.digital_lens_params.as_mut().unwrap()[index] = value;
         #[cfg(feature = "opencv")]
         if let Some(ref mut calib) = *self.lens_calibrator.write() {
-            calib.digital_lens_params = lens.digital_lens_params.clone();
+            calib.digital_lens_params = primary.digital_lens_params.clone();
         }
         self.invalidate_zooming();
     }
     pub fn set_lens_is_asymmetrical(&self, v: bool) {
-        self.lens.write().asymmetrical = v;
+        self.profile.write().primary_mut().asymmetrical = v;
         #[cfg(feature = "opencv")]
         if let Some(ref mut calib) = *self.lens_calibrator.write() {
             calib.asymmetrical = v;
@@ -1133,8 +1153,10 @@ impl StabilizationManager {
         self.pose_estimator.lowpass_filter(lpf, params.fps);
     }
 
+    // TODO(dual-lens UI): takes a lens index once LensProfile.qml exposes lens-2 editing.
     pub fn set_lens_param(&self, param: &str, value: f64) {
-        let mut lens = self.lens.write();
+        let mut lens = self.profile.write();
+        let lens = lens.primary_mut();
         if lens.fisheye_params.distortion_coeffs.len() >= 4 &&
            lens.fisheye_params.camera_matrix.len() == 3 &&
            lens.fisheye_params.camera_matrix[0].len() == 3 &&
@@ -1195,7 +1217,7 @@ impl StabilizationManager {
         StabilizationManager {
             params: Arc::new(RwLock::new(self.params.read().clone())),
             gyro:   Arc::new(RwLock::new(self.gyro.read().clone())),
-            lens:   Arc::new(RwLock::new(self.lens.read().clone())),
+            profile: Arc::new(RwLock::new(self.profile.read().clone())),
             keyframes:  Arc::new(RwLock::new(self.keyframes.read().clone())),
             smoothing:  Arc::new(RwLock::new(self.smoothing.read().clone())),
             input_file: Arc::new(RwLock::new(self.input_file.read().clone())),
@@ -1232,7 +1254,7 @@ impl StabilizationManager {
         *self.camera_id.write() = None;
 
         let mut new_gyro = GyroSource::new();
-        new_gyro.forced_imu_orientation = self.lens.read().imu_orientation.clone();
+        new_gyro.forced_imu_orientation = self.profile.read().imu_orientation.clone();
         *self.gyro.write() = new_gyro;
         self.keyframes.write().clear();
 
@@ -1315,7 +1337,7 @@ impl StabilizationManager {
             "version": 4,
             "app_version": env!("CARGO_PKG_VERSION").to_string(),
             "videofile": input_file.url,
-            "calibration_data": self.lens.read().get_json_value().unwrap_or_else(|_| serde_json::json!({})),
+            "calibration_data": self.profile.read().get_json_value().unwrap_or_else(|_| serde_json::json!({})),
             "date": time::OffsetDateTime::now_local().map(|v| v.date().to_string()).unwrap_or_default(),
 
             "image_sequence_start": input_file.image_sequence_start,
@@ -1677,7 +1699,7 @@ impl StabilizationManager {
                 obj.remove("smoothed_focal_lengths");
             }
             if let Some(lens) = obj.get("calibration_data") {
-                let mut l = self.lens.write();
+                let mut l = self.profile.write();
                 l.load_from_json_value(&lens);
                 let db = self.lens_profile_db.read();
                 l.resolve_interpolations(&db);
@@ -1968,7 +1990,7 @@ impl StabilizationManager {
                 if db.contains_id(&id_str) {
                     match self.load_lens_profile(&id_str) {
                         Ok(_) => {
-                            let (fr, frd) = { let lens = self.lens.read(); (lens.frame_readout_time, lens.frame_readout_direction) };
+                            let (fr, frd) = { let lens = self.profile.read(); lens.lens.first().map(|l| (l.frame_readout_time, l.frame_readout_direction)).unwrap_or_default() };
                             if let Some(fr) = fr {
                                 let mut params = self.params.write();
                                 params.frame_readout_time = fr.abs();
@@ -1984,7 +2006,7 @@ impl StabilizationManager {
             }
             let mut output_width = metadata.width;
             let mut output_height = metadata.height;
-            if let Some(output_dim) = self.lens.read().output_dimension.clone() {
+            if let Some(output_dim) = self.profile.read().output_dimension.clone() {
                 output_width = output_dim.w;
                 output_height = output_dim.h;
             }

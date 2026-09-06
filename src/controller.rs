@@ -55,9 +55,11 @@ pub struct Controller {
     video_file_loaded: qt_method!(fn(&mut self)),
     load_telemetry: qt_method!(fn(&mut self, url: QUrl, is_video: bool, sample_index: i32, project_version: u32)),
     load_lens_profile: qt_method!(fn(&mut self, url_or_id: QString)),
+    save_lens_profile: qt_method!(fn(&mut self, url: QUrl)),
     get_preset_contents: qt_method!(fn(&mut self, url_or_id: QString) -> QString),
     export_lens_profile: qt_method!(fn(&mut self, url: QUrl, info: QJsonObject, upload: bool)),
     export_lens_profile_filename: qt_method!(fn(&mut self, info: QJsonObject) -> QString),
+    get_calibration_json: qt_method!(fn(&self, info: QJsonObject) -> QString),
 
     set_of_method: qt_method!(fn(&self, v: u32)),
     start_autosync: qt_method!(fn(&mut self, timestamps_fract: String, sync_params: String, mode: String)),
@@ -339,6 +341,15 @@ pub struct Controller {
     // (see load_secondary_video/init_video_source) - no separate decoder state to track here.
     dual_lens_file_changed: qt_signal!(path: QString),
     open_dual_lens_file: qt_method!(fn(&mut self, url: QString)),
+
+    // Dual-lens calibration setup (LensProfile.qml's second-lens section). All of these
+    // target profile.lens[1], creating it (with an identity-rotation default) the first
+    // time any of them is called - see LensProfile::lens_mut.
+    load_lens2_profile:  qt_method!(fn(&mut self, url_or_id: QString)),
+    set_lens2_param:      qt_method!(fn(&self, param: QString, value: f64)),
+    set_lens2_rotation_offset: qt_method!(fn(&self, w: f64, x: f64, y: f64, z: f64)),
+    add_second_lens:     qt_method!(fn(&mut self)),
+    remove_second_lens:  qt_method!(fn(&mut self)),
 
     // ---------------------------------------------------------------------
     // Video source (headless MDK decoder). Created and owned by Controller —
@@ -830,7 +841,7 @@ impl Controller {
 
         // Try auto-detecting the secondary file if a dual-lens profile is already loaded
         {
-            let needs_secondary = stab.lens.read().dual_lens.lens2_profile.is_some();
+            let needs_secondary = stab.profile.read().lens.len() > 1;
             if needs_secondary {
                 let primary_url = stab.input_file.read().url.clone();
                 if !primary_url.is_empty() {
@@ -912,12 +923,12 @@ impl Controller {
                 this.load_lens_profile(path.into());
             });
             let reload_lens = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, _| {
-                let lens = this.stabilizer.lens.read();
-                if this.lens_loaded || !lens.path_to_file.is_empty() {
+                let profile = this.stabilizer.profile.read();
+                if this.lens_loaded || !profile.path_to_file.is_empty() {
                     this.lens_loaded = true;
                     this.lens_changed();
-                    let json = lens.get_json().unwrap_or_default();
-                    this.lens_profile_loaded(QString::from(json), QString::from(lens.path_to_file.as_str()), QString::from(lens.checksum.clone().unwrap_or_default()));
+                    let json = profile.get_json().unwrap_or_default();
+                    this.lens_profile_loaded(QString::from(json), QString::from(profile.path_to_file.as_str()), QString::from(profile.checksum.clone().unwrap_or_default()));
                 }
             });
 
@@ -1019,8 +1030,8 @@ impl Controller {
             if let Err(e) = self.stabilizer.load_lens_profile(&url_or_id.to_string()) {
                 self.error(QString::from("An error occured: %1"), QString::from(e.to_string()), QString::default());
             }
-            let lens = self.stabilizer.lens.read();
-            (lens.get_json().unwrap_or_default(), lens.path_to_file.clone(), lens.checksum.clone().unwrap_or_default())
+            let profile = self.stabilizer.profile.read();
+            (profile.get_json().unwrap_or_default(), profile.path_to_file.clone(), profile.checksum.clone().unwrap_or_default())
         };
         self.lens_loaded = true;
         self.lens_changed();
@@ -1028,7 +1039,7 @@ impl Controller {
         self.request_recompute();
 
         // Auto-detect secondary file for dual-lens profiles
-        let needs_secondary = self.stabilizer.lens.read().dual_lens.lens2_profile.is_some();
+        let needs_secondary = self.stabilizer.profile.read().lens.len() > 1;
         if needs_secondary {
             let primary_url = self.stabilizer.input_file.read().url.clone();
             if !primary_url.is_empty() {
@@ -1039,10 +1050,144 @@ impl Controller {
         }
     }
 
+    /// Saves the main window's currently active profile (as edited/assembled in the Lens
+    /// Profile screen - possibly with a lens[1] pushed in from the calibrator via
+    /// load_lens2_profile) to a file. Unlike export_lens_profile, this doesn't touch
+    /// lens_calibrator at all - it just serializes whatever's already in self.stabilizer.profile.
+    fn save_lens_profile(&mut self, url: QUrl) {
+        let url = util::qurl_to_encoded(url);
+        let mut profile = self.stabilizer.profile.read().clone();
+        // set_imu_orientation writes to gyro.imu_transforms.imu_orientation, not the profile
+        // itself (see Stabilizer::set_imu_orientation) - sync the live value in so a session's
+        // IMU orientation adjustment actually gets persisted, not just whatever the originally
+        // loaded profile had.
+        profile.imu_orientation = self.stabilizer.gyro.read().imu_transforms.imu_orientation.clone();
+        if let Err(e) = profile.save_to_file(&url) {
+            self.error(QString::from("An error occured: %1"), QString::from(format!("{:?}", e)), QString::default());
+        }
+    }
+
     fn open_dual_lens_file(&mut self, url: QString) {
         let path = url.to_string();
         let path = path.strip_prefix("file://").unwrap_or(&path).to_owned();
         self.load_secondary_video(path);
+    }
+
+    /// Re-reads the whole profile and re-emits lens_profile_loaded, so LensProfile.qml's
+    /// single JSON-parsing handler (onLens_profile_loaded) stays the one place that updates
+    /// both lens 1 and lens 2's displayed info - these setters don't touch the UI directly.
+    fn notify_profile_changed(&mut self) {
+        let (json, filepath, checksum) = {
+            let profile = self.stabilizer.profile.read();
+            (profile.get_json().unwrap_or_default(), profile.path_to_file.clone(), profile.checksum.clone().unwrap_or_default())
+        };
+        self.lens_profile_loaded(QString::from(json), QString::from(filepath), QString::from(checksum));
+    }
+
+    /// Creates lens[1] if it doesn't exist yet, starting from a copy of lens 1's own optics
+    /// (the common case - symmetric dual-fisheye rigs use the same lens design on both sides)
+    /// rotated 180° about Y (the standard back-to-back mounting). Fine-tuning from there
+    /// happens via set_lens2_param / set_lens2_rotation_offset, or by loading a genuinely
+    /// different calibration file with load_lens2_profile.
+    fn add_second_lens(&mut self) {
+        {
+            let mut profile = self.stabilizer.profile.write();
+            if profile.lens.len() < 2 {
+                let primary = profile.lens.first().cloned().unwrap_or_default();
+                let l2 = profile.lens_mut(1);
+                l2.fisheye_params = primary.fisheye_params;
+                l2.calib_dimension = primary.calib_dimension;
+                l2.orig_dimension = primary.orig_dimension;
+                l2.distortion_model = primary.distortion_model;
+                l2.asymmetrical = primary.asymmetrical;
+                l2.rotation_offset = [0.0, 0.0, 1.0, 0.0]; // 180° about Y
+            }
+            profile.layout = core::lens_profile::DualLensLayout::SeparateFiles;
+        }
+        self.notify_profile_changed();
+        self.request_recompute();
+    }
+
+    /// Drops lens[1] entirely (its calibration data is not recoverable after this - the UI
+    /// should confirm with the user before calling it).
+    fn remove_second_lens(&mut self) {
+        {
+            let mut profile = self.stabilizer.profile.write();
+            profile.lens.truncate(1);
+            profile.layout = core::lens_profile::DualLensLayout::None;
+        }
+        self.notify_profile_changed();
+        self.request_recompute();
+    }
+
+    /// Loads a lens profile file (or a database id) as lens 2's optics, same file/id
+    /// resolution as load_lens_profile - but only its primary lens's calibration is taken;
+    /// everything else about the already-loaded profile (lens 1, layout, rotation) is left
+    /// alone. If lens[1] already exists, its rotation_offset is preserved rather than reset,
+    /// since re-picking a calibration file shouldn't discard a rotation the user already
+    /// fine-tuned; a brand new lens[1] defaults to the 180°-about-Y back-to-back rotation.
+    fn load_lens2_profile(&mut self, url_or_id: QString) {
+        let url = url_or_id.to_string();
+        let loaded = {
+            let db = self.stabilizer.lens_profile_db.read();
+            db.get_by_id(&url).cloned()
+        };
+        let loaded = loaded.or_else(|| {
+            let mut p = core::lens_profile::LensProfile::default();
+            let result = if url.starts_with('{') { p.load_from_data(&url) } else { p.load_from_file(&url) };
+            match result {
+                Ok(()) => Some(p),
+                Err(e) => {
+                    self.error(QString::from("An error occured: %1"), QString::from(e.to_string()), QString::default());
+                    None
+                }
+            }
+        });
+        if let Some(loaded) = loaded {
+            if let Some(new_optics) = loaded.lens.first().cloned() {
+                let mut profile = self.stabilizer.profile.write();
+                let existing_rotation = profile.lens.get(1).map(|l| l.rotation_offset);
+                let l2 = profile.lens_mut(1);
+                *l2 = new_optics;
+                l2.rotation_offset = existing_rotation.unwrap_or([0.0, 0.0, 1.0, 0.0]);
+                profile.layout = core::lens_profile::DualLensLayout::SeparateFiles;
+            }
+        }
+        self.notify_profile_changed();
+        self.request_recompute();
+    }
+
+    fn set_lens2_param(&self, param: QString, value: f64) {
+        let mut profile = self.stabilizer.profile.write();
+        let lens = profile.lens_mut(1);
+        if lens.fisheye_params.distortion_coeffs.len() >= 4 &&
+           lens.fisheye_params.camera_matrix.len() == 3 &&
+           lens.fisheye_params.camera_matrix[0].len() == 3 &&
+           lens.fisheye_params.camera_matrix[1].len() == 3 &&
+           lens.fisheye_params.camera_matrix[2].len() == 3 {
+            match param.to_string().as_str() {
+                "fx" => lens.fisheye_params.camera_matrix[0][0] = value,
+                "fy" => lens.fisheye_params.camera_matrix[1][1] = value,
+                "cx" => lens.fisheye_params.camera_matrix[0][2] = value,
+                "cy" => lens.fisheye_params.camera_matrix[1][2] = value,
+                "k1" => lens.fisheye_params.distortion_coeffs[0] = value,
+                "k2" => lens.fisheye_params.distortion_coeffs[1] = value,
+                "k3" => lens.fisheye_params.distortion_coeffs[2] = value,
+                "k4" => lens.fisheye_params.distortion_coeffs[3] = value,
+                _ => { }
+            }
+        }
+        drop(profile);
+        self.request_recompute();
+    }
+
+    /// `[w, x, y, z]` - the full rotation from lens 1's frame to lens 2's, no separate base
+    /// rotation applied anywhere else. LensProfile.qml keeps this in sync with its own
+    /// pitch/yaw/roll fields (via Qt.quaternion's Euler conversion) and always sends the
+    /// resulting quaternion here, regardless of which representation the user edited.
+    fn set_lens2_rotation_offset(&self, w: f64, x: f64, y: f64, z: f64) {
+        self.stabilizer.profile.write().lens_mut(1).rotation_offset = [w, x, y, z];
+        self.request_recompute();
     }
     fn load_default_preset(&mut self) {
         // Assumes regular filesystem
@@ -1788,7 +1933,7 @@ impl Controller {
             this.request_recompute();
         });
 
-        let lens_checksum = self.stabilizer.lens.read().checksum.clone();
+        let lens_checksum = self.stabilizer.profile.read().checksum.clone();
 
         let stab = self.stabilizer.clone();
         core::run_threaded(move || {
@@ -1806,7 +1951,7 @@ impl Controller {
     fn export_gyroflow_data(&self, typ: QString, additional_data: QJsonObject) -> QString {
         let typ = core::GyroflowProjectType::from_str(&typ.to_string()).unwrap();
 
-        util::report_lens_profile_usage(self.stabilizer.lens.read().checksum.clone());
+        util::report_lens_profile_usage(self.stabilizer.profile.read().checksum.clone());
 
         QString::from(self.stabilizer.export_gyroflow_data(typ, &additional_data.to_json().to_string(), None).unwrap_or_default())
     }
@@ -1937,7 +2082,7 @@ impl Controller {
                 if thin_obj.as_object().unwrap().contains_key("calibration_data") {
                     self.lens_loaded = true;
                     self.lens_changed();
-                    let lens_json = self.stabilizer.lens.read().get_json().unwrap_or_default();
+                    let lens_json = self.stabilizer.profile.read().get_json().unwrap_or_default();
                     self.lens_profile_loaded(QString::from(lens_json), QString::default(), QString::default());
                 }
                 self.update_offset_model();
@@ -2151,9 +2296,10 @@ impl Controller {
 
             let (fps, frame_count, trim_ranges_ms, trim_ratio, org_size, input_horizontal_stretch, input_vertical_stretch) = {
                 let params = stab.params.read();
-                let lens = stab.lens.read();
-                let input_horizontal_stretch = if lens.input_horizontal_stretch > 0.01 { lens.input_horizontal_stretch } else { 1.0 };
-                let input_vertical_stretch = if lens.input_vertical_stretch > 0.01 { lens.input_vertical_stretch } else { 1.0 };
+                let profile = stab.profile.read();
+                let primary = profile.lens.first();
+                let input_horizontal_stretch = primary.map(|l| l.input_horizontal_stretch).filter(|v| *v > 0.01).unwrap_or(1.0);
+                let input_vertical_stretch = primary.map(|l| l.input_vertical_stretch).filter(|v| *v > 0.01).unwrap_or(1.0);
                 (params.fps, params.frame_count, params.trim_ranges.iter().map(|x| (x.0 * params.duration_ms, x.1 * params.duration_ms)).collect(), params.get_trim_ratio(), params.size, input_horizontal_stretch, input_vertical_stretch)
             };
 
@@ -2294,7 +2440,7 @@ impl Controller {
                     err(("An error occured: %1".to_string(), format!("{:?}", e)));
                 } else {
                     if cal.rms < 100.0 {
-                        stab.lens.write().set_from_calibrator(cal);
+                        stab.profile.write().primary_mut().set_from_calibrator(cal);
                     }
                     ::log::debug!("rms: {}, used_frames: {:?}, camera_matrix: {}, coefficients: {}", cal.rms, cal.used_points.keys(), cal.k, cal.d);
                 }
@@ -2350,7 +2496,7 @@ impl Controller {
                 }
                 if cal.calibrate(true).is_ok() {
                     rms = cal.rms;
-                    self.stabilizer.lens.write().set_from_calibrator(cal);
+                    self.stabilizer.profile.write().primary_mut().set_from_calibrator(cal);
                     ::log::debug!("rms: {}, used_frames: {:?}, camera_matrix: {}, coefficients: {}", cal.rms, cal.used_points.keys(), cal.k, cal.d);
                 }
             }
@@ -2367,12 +2513,34 @@ impl Controller {
         if let Ok(mut profile) = core::lens_profile::LensProfile::from_json(&info_json) {
             #[cfg(feature = "opencv")]
             if let Some(ref cal) = *self.stabilizer.lens_calibrator.read() {
-                profile.set_from_calibrator(cal);
+                profile.primary_mut().set_from_calibrator(cal);
+                profile.calibrator_version = env!("CARGO_PKG_VERSION").to_string();
             }
             let name = profile.get_name()
                 .replace([':', '|', '*', ':'], "_")
                 .replace(['<', '"', '>', '/', '\\'], "");
             return QString::from(format!("{}.json", name));
+        }
+        QString::default()
+    }
+
+    /// Same calibration result export_lens_profile would write to a file, but returned as a
+    /// JSON string instead - used by the calibrator's "use as second lens" button (see
+    /// LensCalibrate.qml) to hand a fresh calibration straight to the *main* window's
+    /// Controller::load_lens2_profile without a save-then-browse-for-it round trip through
+    /// disk. The calibrator runs as its own separate Controller/StabilizationManager (see
+    /// ui_tools::init_calibrator), so this only reads from `self` (the calibrator's own
+    /// lens_calibrator) - it never touches the main profile directly.
+    fn get_calibration_json(&self, info: QJsonObject) -> QString {
+        let info_json = info.to_json().to_string();
+
+        if let Ok(mut profile) = core::lens_profile::LensProfile::from_json(&info_json) {
+            #[cfg(feature = "opencv")]
+            if let Some(ref cal) = *self.stabilizer.lens_calibrator.read() {
+                profile.primary_mut().set_from_calibrator(cal);
+                profile.calibrator_version = env!("CARGO_PKG_VERSION").to_string();
+            }
+            return QString::from(profile.get_json().unwrap_or_default());
         }
         QString::default()
     }
@@ -2385,7 +2553,8 @@ impl Controller {
             Ok(mut profile) => {
                 #[cfg(feature = "opencv")]
                 if let Some(ref cal) = *self.stabilizer.lens_calibrator.read() {
-                    profile.set_from_calibrator(cal);
+                    profile.primary_mut().set_from_calibrator(cal);
+                    profile.calibrator_version = env!("CARGO_PKG_VERSION").to_string();
                 }
 
                 match profile.save_to_file(&url) {

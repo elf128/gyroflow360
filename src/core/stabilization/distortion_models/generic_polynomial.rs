@@ -122,7 +122,7 @@ impl GenericPolynomial {
         (x * scale, y * scale)
     }
 
-    pub fn adjust_lens_profile(&self, _profile: &mut crate::LensProfile) { }
+    pub fn adjust_lens_profile(&self, _lens: &mut crate::lens_profile::LensParams) { }
 
     pub fn distortion_derivative(&self, theta: f64, k: &[f64]) -> Option<f64> {
         // Evaluates d/dθ [Σ k[i]·θ^(i+1)] = Σ (i+1)·k[i]·θ^i over the supplied

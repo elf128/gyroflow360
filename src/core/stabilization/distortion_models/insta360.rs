@@ -46,7 +46,7 @@ impl Insta360 {
             y * (1.0 + k1*r2 + k2*r4 + k3*r6) + 2.0*p2*x*y + p1*(r2 + 2.0*y*y)
         )
     }
-    pub fn adjust_lens_profile(&self, _profile: &mut crate::LensProfile) { }
+    pub fn adjust_lens_profile(&self, _lens: &mut crate::lens_profile::LensParams) { }
 
     pub fn distortion_derivative(&self, _theta: f64, _k: &[f64]) -> Option<f64> {
         None

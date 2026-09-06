@@ -43,9 +43,9 @@ macro_rules! impl_models {
                     $(DistortionModels::$name(m) => m.distort_point(x, y, z, params),)*
                 }
             }
-            pub fn adjust_lens_profile(&self, profile: &mut crate::LensProfile) {
+            pub fn adjust_lens_profile(&self, lens: &mut crate::lens_profile::LensParams) {
                 match &self.inner {
-                    $(DistortionModels::$name(m) => m.adjust_lens_profile(profile),)*
+                    $(DistortionModels::$name(m) => m.adjust_lens_profile(lens),)*
                 }
             }
             pub fn radial_distortion_limit(&self, k: &[f64]) -> Option<f64> {

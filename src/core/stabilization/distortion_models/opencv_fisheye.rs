@@ -85,7 +85,7 @@ impl OpenCVFisheye {
         (x * scale, y * scale)
     }
 
-    pub fn adjust_lens_profile(&self, _profile: &mut crate::LensProfile) { }
+    pub fn adjust_lens_profile(&self, _lens: &mut crate::lens_profile::LensParams) { }
 
     pub fn distortion_derivative(&self, theta: f64, k: &[f64]) -> Option<f64> {
         if k.len() < 4 { return None; }

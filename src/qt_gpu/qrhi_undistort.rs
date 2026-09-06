@@ -50,9 +50,10 @@ pub fn render(mdkplayer: &MDKPlayerWrapper, mdkplayer2: Option<&MDKPlayerWrapper
     if let Some(p) = stab.params.try_read() {
         output_size = QSize { width: p.output_size.0 as u32, height: p.output_size.1 as u32 };
         {
-            let lens = stab.lens.read();
-            let dm = lens.distortion_model.as_deref().unwrap_or("opencv_fisheye");
-            let dl = lens.digital_lens.as_deref().unwrap_or("");
+            let profile = stab.profile.read();
+            let primary = profile.lens.first();
+            let dm = primary.and_then(|l| l.distortion_model.as_deref()).unwrap_or("opencv_fisheye");
+            let dl = primary.and_then(|l| l.digital_lens.as_deref()).unwrap_or("");
             let dl_suffix = if dl.is_empty() { String::new() } else { format!("_{}", dl) };
             shader_path      = QString::from(format!(":/src/qt_gpu/compiled/undistort_{}{}.frag.qsb", dm, dl_suffix));
             distortion_model = QString::from(dm);
@@ -167,6 +168,17 @@ pub fn create_viewport(container: &qmetaobject::QJSValue) -> usize {
         QObject *obj = container->toQObject();
         auto *parent = qobject_cast<QQuickItem *>(obj);
         if (!parent) return 0;
+        // Reconnect to an already-existing viewport rather than creating a duplicate.
+        // The calibrator recreates its whole Controller on every file load (see
+        // UITools::init_calibrator), but the QML item tree - and any viewport already
+        // parented into this container by a previous, since-replaced Controller - persists
+        // across that. Only fall through to creating a new one if this container is
+        // genuinely new (the whole window/bundle was just constructed from scratch).
+        const auto children = parent->childItems();
+        for (QQuickItem *child : children) {
+            auto *existing = dynamic_cast<GyroflowViewport *>(child);
+            if (existing) return reinterpret_cast<uintptr_t>(existing);
+        }
         auto *viewport = new GyroflowViewport(parent);
         viewport->setWidth(parent->width());
         viewport->setHeight(parent->height());
@@ -299,8 +311,8 @@ pub fn create_mdk_source(container: &qmetaobject::QJSValue) -> usize {
         if (!item) return 0;
         item->setParentItem(parent);
         item->setSize(parent->size());
-        QObject::connect(parent, &QQuickItem::widthChanged,  parent, [item, parent]() { item->setWidth(parent->width()); });
-        QObject::connect(parent, &QQuickItem::heightChanged, parent, [item, parent]() { item->setHeight(parent->height()); });
+        QObject::connect(parent, &QQuickItem::widthChanged,  item, [item, parent]() { item->setWidth(parent->width()); });
+        QObject::connect(parent, &QQuickItem::heightChanged, item, [item, parent]() { item->setHeight(parent->height()); });
         return reinterpret_cast<uintptr_t>(item);
     })
 }

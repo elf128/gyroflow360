@@ -72,7 +72,7 @@ impl GoPro {
         (pos.0 * scale, pos.1 * scale)
     }
 
-    pub fn adjust_lens_profile(&self, _profile: &mut crate::LensProfile) { }
+    pub fn adjust_lens_profile(&self, _lens: &mut crate::lens_profile::LensParams) { }
 
     pub fn distortion_derivative(&self, theta: f64, k: &[f64]) -> Option<f64> {
         // d(r_norm)/dθ where r_norm = k1·p and θ = POLY(p): sign tracks POLY'(p). The POLY

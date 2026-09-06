@@ -14,6 +14,7 @@ Item {
     anchors.horizontalCenter: parent.horizontalCenter;
 
     property alias mdkSourceContainer: mdkSourceContainer;
+    property alias gyroflowViewportContainer: gyroflowViewportContainer;
     property alias timeline: timeline;
     property alias durationMs: timeline.durationMs;
     property alias videoLoader: videoLoader;

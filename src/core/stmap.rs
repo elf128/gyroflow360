@@ -10,8 +10,9 @@ pub fn generate_stmaps(stab: &StabilizationManager, per_frame: bool) -> impl Ite
     };
 
     let filename_base = {
-        let lens = stab.lens.read();
-        format!("{}-{}-{}-{}", crate::filesystem::get_filename(&stab.input_file.read().url), lens.camera_brand, lens.camera_model, lens.lens_model)
+        let profile = stab.profile.read();
+        let lens_model = profile.lens.first().map(|l| l.lens_model.as_str()).unwrap_or("");
+        format!("{}-{}-{}-{}", crate::filesystem::get_filename(&stab.input_file.read().url), profile.camera_brand, profile.camera_model, lens_model)
             .replace("/", "-")
             .replace("\\", "-")
             .replace(":", "-")

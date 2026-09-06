@@ -315,6 +315,24 @@ MenuItem {
             fileDialog.open2();
         }
     }
+    Button {
+        text: qsTr("Use as second lens for open profile");
+        iconName: "lens";
+        enabled: infoList.rms > 0 && infoList.rms < 100 && calibrator_window.controller.video_loaded;
+        anchors.horizontalCenter: parent.horizontalCenter;
+        // Hands this calibration straight to the main window's profile.lens[1] - the
+        // calibrator itself never touches the main profile (it runs as a fully separate
+        // Controller), so this is the bridge between the two. No file save/load round trip:
+        // load_lens2_profile already accepts inline JSON (anything starting with "{").
+        onClicked: {
+            list.commitAll();
+            const json = controller.get_calibration_json(calib.calibrationInfo);
+            if (json) {
+                window.controller.load_lens2_profile(json);
+                messageBox(Modal.NoIcon, qsTr("Applied to the second lens of the profile open in the main window."), [{ text: qsTr("Ok") }]);
+            }
+        }
+    }
     CheckBox {
         id: uploadProfile;
         text: qsTr("Upload lens profile to the database");

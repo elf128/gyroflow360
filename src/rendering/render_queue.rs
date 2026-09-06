@@ -404,7 +404,7 @@ impl RenderQueue {
                     let stab = self.stabilizer.get_cloned();
 
                     // If it's added from main UI, never do the additional autosync
-                    if let Some(ref mut obj) = stab.lens.write().sync_settings { obj.as_object_mut().and_then(|x| x.remove("do_autosync")); }
+                    if let Some(ref mut obj) = stab.profile.write().primary_mut().sync_settings { obj.as_object_mut().and_then(|x| x.remove("do_autosync")); }
 
                     self.add_internal(job_id, Arc::new(stab), render_options, additional_data, thumbnail_url);
                 }
@@ -943,7 +943,7 @@ impl RenderQueue {
             let mut additional_data = job.additional_data.clone();
             let mut proc_height = self.processing_resolution;
             let err2 = err.clone();
-            if let Some(ref ss) = stab.lens.read().sync_settings {
+            if let Some(ss) = stab.profile.read().lens.first().and_then(|l| l.sync_settings.as_ref()) {
                 if let Some(pr) = ss.get("processing_resolution").and_then(|x| x.as_u64()) {
                     proc_height = pr as i32;
                 }
@@ -1361,7 +1361,7 @@ impl RenderQueue {
                                     if db.contains_id(&id_str) {
                                         match stab.load_lens_profile(&id_str) {
                                             Ok(_) => {
-                                                let (fr, frd) = { let lens = stab.lens.read(); (lens.frame_readout_time, lens.frame_readout_direction) };
+                                                let (fr, frd) = { let profile = stab.profile.read(); profile.lens.first().map(|l| (l.frame_readout_time, l.frame_readout_direction)).unwrap_or_default() };
                                                 if let Some(fr) = fr {
                                                     let mut params = stab.params.write();
                                                     params.frame_readout_time = fr.abs();
@@ -1375,7 +1375,7 @@ impl RenderQueue {
                                         }
                                     }
                                 }
-                                if let Some(output_dim) = stab.lens.read().output_dimension.clone() {
+                                if let Some(output_dim) = stab.profile.read().output_dimension.clone() {
                                     if !has_output_width {
                                         render_options.output_width = output_dim.w;
                                     }
@@ -1434,7 +1434,7 @@ impl RenderQueue {
         };
         let fps = stab.params.read().fps;
 
-        let sync_settings = stab.lens.read().sync_settings.clone().unwrap_or_default();
+        let sync_settings = stab.profile.read().lens.first().and_then(|l| l.sync_settings.clone()).unwrap_or_default();
         if !has_sync_points && !has_accurate_timestamps && sync_settings.get("do_autosync").and_then(|v| v.as_bool()).unwrap_or_default() {
             // ----------------------------------------------------------------------------
             // --------------------------------- Autosync ---------------------------------
@@ -1729,12 +1729,12 @@ impl RenderQueue {
     }
 
     fn update_sync_settings(stab: &StabilizationManager, sync_options: &serde_json::Value) {
-        let mut sync_settings = stab.lens.read().sync_settings.clone().unwrap_or(sync_options.clone());
+        let mut sync_settings = stab.profile.read().lens.first().and_then(|l| l.sync_settings.clone()).unwrap_or(sync_options.clone());
         if sync_settings.is_object() && sync_options.is_object() {
             crate::core::util::merge_json(&mut sync_settings, sync_options);
         }
         if sync_settings.is_object() && !sync_settings.as_object().unwrap().is_empty() {
-            stab.lens.write().sync_settings = Some(sync_settings);
+            stab.profile.write().primary_mut().sync_settings = Some(sync_settings);
         }
     }
 }

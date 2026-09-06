@@ -6,7 +6,7 @@ use super::distortion_models::DistortionModel;
 use crate::stabilization_params::ReadoutDirection;
 use crate::GyroSource;
 use crate::keyframes::KeyframeManager;
-use crate::lens_profile::LensProfile;
+use crate::lens_profile::LensParams;
 use std::sync::Arc;
 use parking_lot::RwLock;
 
@@ -16,7 +16,8 @@ pub struct ComputeParams {
     pub fovs: Vec<f64>,
     pub minimal_fovs: Vec<f64>,
     pub keyframes: KeyframeManager,
-    pub lens: LensProfile,
+    /// The primary lens (`LensProfile.lens[0]`).
+    pub lens: LensParams,
     pub camera_diagonal_fovs: Vec<f64>,
 
     pub frame_count: usize,
@@ -61,10 +62,11 @@ pub struct ComputeParams {
     pub digital_lens: Option<DistortionModel>,
     pub digital_lens_params: Option<Vec<f64>>,
 
-    // Dual lens
-    pub lens2: Option<LensProfile>,
+    // Dual lens - `LensProfile.lens[1]`, if present. Its `rotation_offset` quaternion carries
+    // the full camera-1 -> camera-2 rotation directly, so there's no separate offset field
+    // here anymore (see LensParams::rotation_offset).
+    pub lens2: Option<LensParams>,
     pub lens2_distortion_model: Option<DistortionModel>,
-    pub lens2_rotation_offset: [f64; 3], // degrees [pitch, yaw, roll]
 
     // Focal length smoothing
     pub focal_lengths: Vec<Option<f64>>,
@@ -76,17 +78,21 @@ impl ComputeParams {
     pub fn from_manager(mgr: &StabilizationManager) -> Self {
         let params = mgr.params.read();
 
-        let lens = mgr.lens.read().clone();
+        let profile = mgr.profile.read().clone();
+        let lens = profile.lens.first().cloned().unwrap_or_default();
 
         let distortion_model = DistortionModel::from_name(lens.distortion_model.as_deref().unwrap_or("opencv_fisheye"));
         let digital_lens = lens.digital_lens.as_ref().map(|x| DistortionModel::from_name(&x));
         let digital_lens_params = lens.digital_lens_params.clone();
 
-        let lens2 = lens.dual_lens.lens2_profile.as_ref().map(|p| *p.clone());
+        // The calibrator processes one lens's footage at a time and never sets up a second
+        // video item (see Controller::init_video_source / video_file_loaded's is_calibrator
+        // guard) - so even if its profile happens to carry a lens[1] (e.g. from a dual-lens
+        // default/last-used preset), dual-lens rendering must not activate for it.
+        let lens2 = if params.is_calibrator { None } else { profile.lens.get(1).cloned() };
         let lens2_distortion_model = lens2.as_ref().map(|p| {
             DistortionModel::from_name(p.distortion_model.as_deref().unwrap_or("opencv_fisheye"))
         });
-        let lens2_rotation_offset = lens.dual_lens.lens2_rotation_offset;
 
         Self {
             gyro: mgr.gyro.clone(),
@@ -136,7 +142,6 @@ impl ComputeParams {
 
             lens2,
             lens2_distortion_model,
-            lens2_rotation_offset,
             suppress_rotation: false,
             fov_algorithm_margin: 2.0,
 

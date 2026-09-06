@@ -94,8 +94,9 @@ impl LensProfileDatabase {
                 Ok(mut v) => {
                     v.path_to_file = f_name.to_string();
                     for mut profile in v.get_all_matching_profiles() {
-                        let key = if !profile.identifier.is_empty() {
-                            profile.identifier.clone()
+                        let primary = profile.lens.first().cloned().unwrap_or_default();
+                        let key = if !primary.identifier.is_empty() {
+                            primary.identifier.clone()
                         } else {
                             f_name.to_string()
                         };
@@ -108,20 +109,20 @@ impl LensProfileDatabase {
                             }
                             (|| -> Option<()> {
                                 let to_checksum = format!("{}|{}{}|{:.8}{:.8}|{:.8}{:.8}|{:.8}{:.8}{:.8}{:.8}",
-                                    profile.identifier,
+                                    primary.identifier,
 
-                                    profile.calib_dimension.w,
-                                    profile.calib_dimension.h,
+                                    primary.calib_dimension.w,
+                                    primary.calib_dimension.h,
 
-                                    profile.fisheye_params.camera_matrix.get(0)?.get(0)?,
-                                    profile.fisheye_params.camera_matrix.get(1)?.get(1)?,
-                                    profile.fisheye_params.camera_matrix.get(0)?.get(2)?,
-                                    profile.fisheye_params.camera_matrix.get(1)?.get(2)?,
+                                    primary.fisheye_params.camera_matrix.get(0)?.get(0)?,
+                                    primary.fisheye_params.camera_matrix.get(1)?.get(1)?,
+                                    primary.fisheye_params.camera_matrix.get(0)?.get(2)?,
+                                    primary.fisheye_params.camera_matrix.get(1)?.get(2)?,
 
-                                    profile.fisheye_params.distortion_coeffs.get(0).unwrap_or(&0.0),
-                                    profile.fisheye_params.distortion_coeffs.get(1).unwrap_or(&0.0),
-                                    profile.fisheye_params.distortion_coeffs.get(2).unwrap_or(&0.0),
-                                    profile.fisheye_params.distortion_coeffs.get(3).unwrap_or(&0.0)
+                                    primary.fisheye_params.distortion_coeffs.get(0).unwrap_or(&0.0),
+                                    primary.fisheye_params.distortion_coeffs.get(1).unwrap_or(&0.0),
+                                    primary.fisheye_params.distortion_coeffs.get(2).unwrap_or(&0.0),
+                                    primary.fisheye_params.distortion_coeffs.get(3).unwrap_or(&0.0)
                                 );
 
                                 profile.checksum = Some(format!("{:08x}", crc32fast::hash(to_checksum.as_bytes())));
@@ -257,10 +258,11 @@ impl LensProfileDatabase {
                     }
                     set.insert(new_name.clone());
 
-                    let hstretch = if v.input_horizontal_stretch > 0.01 { v.input_horizontal_stretch } else { 1.0 };
-                    let vstretch = if v.input_vertical_stretch   > 0.01 { v.input_vertical_stretch   } else { 1.0 };
+                    let primary = v.lens.first().cloned().unwrap_or_default();
+                    let hstretch = if primary.input_horizontal_stretch > 0.01 { primary.input_horizontal_stretch } else { 1.0 };
+                    let vstretch = if primary.input_vertical_stretch   > 0.01 { primary.input_vertical_stretch   } else { 1.0 };
 
-                    let aspect_ratio = (((v.calib_dimension.w as f64 / hstretch) / (v.calib_dimension.h.max(1) as f64 / vstretch)) * 1000.0).round() as i32;
+                    let aspect_ratio = (((primary.calib_dimension.w as f64 / hstretch) / (primary.calib_dimension.h.max(1) as f64 / vstretch)) * 1000.0).round() as i32;
                     self.list_for_ui.push((new_name, k.clone(), v.checksum.clone().unwrap_or_default(), v.official, v.rating.clone().unwrap_or_default(), aspect_ratio, v.calibrated_by.clone()));
                 }
             } else {
@@ -403,12 +405,13 @@ impl LensProfileDatabase {
         let mut coeffs_map = BTreeMap::new();
         for (_k, v) in &self.map {
             if !v.is_copy {
-                let coeffs = format!("{:?}", v.fisheye_params.distortion_coeffs);
+                let primary = v.lens.first().cloned().unwrap_or_default();
+                let coeffs = format!("{:?}", primary.fisheye_params.distortion_coeffs);
                 if coeffs_map.contains_key(&coeffs) {
                     println!("Duplicate profile:\n{}\n{}\n", coeffs_map[&coeffs], v.path_to_file.replace(&path, ""))
                 }
                 coeffs_map.insert(coeffs, v.path_to_file.replace(&path, ""));
-                lines.push(format!("[{:<50}, {:<50}, {:<50}, {:<80}, {}],", q(&v.camera_brand), q(&v.camera_model), q(&v.lens_model), q(&v.camera_setting), q(&v.path_to_file.replace(&path, ""))));
+                lines.push(format!("[{:<50}, {:<50}, {:<50}, {:<80}, {}],", q(&v.camera_brand), q(&v.camera_model), q(&primary.lens_model), q(&v.camera_setting), q(&v.path_to_file.replace(&path, ""))));
             }
         }
         lines.sort_by(|a, b| a.to_lowercase().trim().cmp(&b.to_lowercase().trim()));
@@ -444,11 +447,12 @@ impl LensProfileDatabase {
                     continue;
                 }
 
+                let parsed_primary = parsed.lens.first().cloned().unwrap_or_default();
                 cam_setting = cam_setting
-                    .replace(&format!("{}x{}", parsed.calib_dimension.w, parsed.calib_dimension.h), "")
-                    .replace(&format!("{}p", parsed.calib_dimension.h), "")
-                    .replace(&parsed.get_aspect_ratio(), "")
-                    .replace(parsed.get_size_str(), "")
+                    .replace(&format!("{}x{}", parsed_primary.calib_dimension.w, parsed_primary.calib_dimension.h), "")
+                    .replace(&format!("{}p", parsed_primary.calib_dimension.h), "")
+                    .replace(&parsed_primary.get_aspect_ratio(), "")
+                    .replace(parsed_primary.get_size_str(), "")
                     .replace("1080", "")
                     .replace("2160", "")
                     .replace("C4K", "")

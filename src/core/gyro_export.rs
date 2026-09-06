@@ -100,7 +100,7 @@ pub fn export_gyro_data(filename: &str, fields_json: &str, stab: &Arc<crate::Sta
 
     let gyro = stab.gyro.read();
     let file_metadata = gyro.file_metadata.read();
-    let mut focal_length_value = stab.lens.read().focal_length;
+    let mut focal_length_value = stab.profile.read().lens.first().and_then(|l| l.focal_length);
 
     let timestamps: Vec<(Option<usize>, usize, TimestampType, f64)> = if all_samples {
         let mut frame = 0;

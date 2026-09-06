@@ -13,7 +13,7 @@
 //   [15]    unused
 // gopro_map is the recorded(warped) -> wide(sensor) map (direct eval in undistort, Newton-invert in distort).
 
-use crate::{ stabilization::KernelParams, lens_profile::LensProfile };
+use crate::{ stabilization::KernelParams, lens_profile::LensParams };
 
 #[derive(Default, Clone)]
 pub struct GoProWarp { }
@@ -92,7 +92,7 @@ impl GoProWarp {
         ((pp.0 + 0.5) * size.0,
          (pp.1 + 0.5) * size.1)
     }
-    pub fn adjust_lens_profile(&self, _profile: &mut LensProfile) {
+    pub fn adjust_lens_profile(&self, _lens: &mut LensParams) {
         // No-op: telemetry-parser emits a fully-resolved profile (calib_dimension = VRES, 16:9 output).
     }
     pub fn distortion_derivative(&self, _theta: f64, _k: &[f64]) -> Option<f64> {

@@ -205,6 +205,17 @@ impl UITools {
     }
 
     pub fn init_calibrator(&mut self) {
+        // The reuse guard below was disabled the day after it was written (2021-12-31,
+        // "A few fixes", no rationale given) - almost certainly to paper over some
+        // stale-state bug from reusing the same Controller/LensCalibrator across loads,
+        // rather than a deliberate design choice. It predates lens profiles, dual-lens,
+        // and the Player/Viewport split, and was never revisited. Recreating the whole
+        // Controller on every load now silently orphans anything tied to the old
+        // instance's lifetime (e.g. the viewport - see Controller::init_viewport /
+        // qrhi_undistort::create_viewport's reuse check). We should come back and
+        // properly reinstate reuse here, with an explicit reset of only the state that
+        // actually needs it (video source, profile, lens_calibrator), instead of
+        // rebuilding the whole Controller.
         //if self.calibrator_ctl.is_none() {
             self.calibrator_ctl = Some(RefCell::new(Controller::new()));
 

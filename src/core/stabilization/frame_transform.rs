@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright © 2021-2022 Adrian <adrian.eddy at gmail>
 
-use nalgebra::{ Matrix3, Matrix4, Rotation3, Vector3 };
+use nalgebra::{ Matrix3, Matrix4, Quaternion, UnitQuaternion, Vector3 };
 use super::{ ComputeParams, KernelParams };
 use rayon::iter::{ ParallelIterator, IntoParallelIterator };
 use crate::gyro_source::FileMetadata;
@@ -377,14 +377,13 @@ impl FrameTransform {
             let cam2 = l2.get_camera_matrix((params.width, params.height), false);
             let dist2 = l2.get_distortion_coeffs();
 
-            // Base rotation: lens 2 faces backward (180° around Y).
-            let base: Matrix3<f64> = Matrix3::new(-1.0, 0.0, 0.0,  0.0, 1.0, 0.0,  0.0, 0.0, -1.0);
-            // User-supplied offset angles in degrees [pitch, yaw, roll].
-            let [pitch, yaw, roll] = params.lens2_rotation_offset;
-            let offset = Rotation3::from_euler_angles(
-                roll.to_radians(), pitch.to_radians(), yaw.to_radians()
-            );
-            let lens2_rot: Matrix3<f64> = *offset.matrix() * base;
+            // Fixed rotation from lens 1 (reference) space into lens 2's own camera space -
+            // authored directly on the lens2 LensParams entry as a quaternion [w,x,y,z]. This
+            // encodes the *entire* mounting rotation (nominally ~180° about Y for a
+            // back-to-back rig, plus whatever real deviation the unit has, including roll
+            // around the optical axis) - there's no separate hardcoded base rotation here.
+            let [qw, qx, qy, qz] = l2.rotation_offset;
+            let lens2_rot: Matrix3<f64> = *UnitQuaternion::from_quaternion(Quaternion::new(qw, qx, qy, qz)).to_rotation_matrix().matrix();
 
             // Optical axis of lens 2 in world space = R^T * [0,0,1] = third row of R (world→lens).
             let axis1 = [0.0f32, 0.0, 1.0]; // lens 1 points "forward"

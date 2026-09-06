@@ -51,9 +51,48 @@ MenuItem {
         controller.load_lens_profile(url.toString());
     }
 
+    FileDialog {
+        id: saveFileDialog;
+        fileMode: FileDialog.SaveFile;
+        defaultSuffix: "json";
+
+        title: qsTr("Save lens profile");
+        nameFilters: Qt.platform.os == "android"? undefined : [qsTr("Lens profiles") + " (*.json)"];
+        type: "output-preset";
+        onAccepted: controller.save_lens_profile(selectedFile);
+        Component.onCompleted: {
+            if (Qt.platform.os != "android" && Qt.platform.os != "ios") {
+                currentFolder = filesystem.path_to_url(settings.dataDir("lens_profiles"));
+            }
+        }
+    }
+
     function loadGyroflow(obj: var): void {
         if (typeof obj.light_refraction_coefficient !== "undefined") {
             isUnderwater.checked = Math.round(+obj.light_refraction_coefficient * 1000) == 1330;
+        }
+    }
+
+    // Declared at root scope (not inside either AdvancedSection) so both the lens-1 and
+    // lens-2 Advanced sections below can use it.
+    component SmallNumberField: NumberField {
+        property bool preventChange2: true;
+        width: parent.width / 2;
+        precision: 12;
+        property string param: "  ";
+        property bool isLens2: false;
+        tooltip: param[0] + "<font size=\"1\">" + param[1] + "</font>"
+        font.pixelSize: 11 * dpiScale;
+        onValueChanged: {
+            if (!preventChange2) {
+                if (isLens2) controller.set_lens2_param(param, value);
+                else controller.set_lens_param(param, value);
+            }
+        }
+        function setInitialValue(v: real): void {
+            preventChange2 = true;
+            value = v;
+            preventChange2 = false;
         }
     }
 
@@ -101,24 +140,29 @@ MenuItem {
             if (json_str) {
                 const obj = JSON.parse(json_str);
                 if (obj) {
+                    // Lens-level fields (calibration, distortion, etc.) live in obj.lens[0] in
+                    // the current format; legacy single-lens profiles have no "lens" array at
+                    // all and keep everything flattened at the top, so fall back to obj itself.
+                    const lens0 = (obj.lens && obj.lens.length > 0) ? obj.lens[0] : obj;
+
                     let lensInfo = {
                         "Camera":          obj.camera_brand + " " + obj.camera_model,
-                        "Lens":            obj.lens_model,
+                        "Lens":            lens0.lens_model,
                         "Setting":         obj.camera_setting,
                         "Additional info": obj.note,
-                        "Dimensions":      obj.calib_dimension.w + "x" + obj.calib_dimension.h,
+                        "Dimensions":      lens0.calib_dimension.w + "x" + lens0.calib_dimension.h,
                         "Calibrated by":   obj.calibrated_by
                     };
 
-                    if (+obj.focal_length > 0) lensInfo["Focal length"] = obj.focal_length.toFixed(2) + " mm";
-                    if (+obj.crop_factor  > 0) lensInfo["Crop factor"]  = obj.crop_factor.toFixed(2) + "x";
-                    if (obj.asymmetrical) lensInfo["Asymmetrical"] = qsTr("Yes");
-                    if (obj.distortion_model && obj.distortion_model != "opencv_fisheye") lensInfo["Distortion model"] = obj.distortion_model;
-                    if (obj.digital_lens) lensInfo["Digital lens"] = obj.digital_lens;
+                    if (+lens0.focal_length > 0) lensInfo["Focal length"] = lens0.focal_length.toFixed(2) + " mm";
+                    if (+lens0.crop_factor  > 0) lensInfo["Crop factor"]  = lens0.crop_factor.toFixed(2) + "x";
+                    if (lens0.asymmetrical) lensInfo["Asymmetrical"] = qsTr("Yes");
+                    if (lens0.distortion_model && lens0.distortion_model != "opencv_fisheye") lensInfo["Distortion model"] = lens0.distortion_model;
+                    if (lens0.digital_lens) lensInfo["Digital lens"] = lens0.digital_lens;
 
                     info.model = lensInfo;
 
-                    root.cropFactor = +obj.crop_factor;
+                    root.cropFactor = +lens0.crop_factor;
 
                     if (!root.selected_manually &&
                            (obj.calibrated_by == "Eddy" ||
@@ -135,7 +179,7 @@ MenuItem {
                     officialInfo.show = !obj.official && !settings.value("rated-profile-" + checksum, false);
                     officialInfo.canRate = true;
                     officialInfo.thankYou = false;
-                    root.isDualLens = !!(obj.dual_lens && obj.dual_lens.lens2_profile);
+                    root.isDualLens = !!(obj.lens && obj.lens.length > 1);
                     root.profileName = (filepath || obj.name || "").replace(/^.*?[\/\\]([^\/\\]+?)$/, "$1");
                     root.profileOriginalJson = json_str;
                     root.profileChecksum = checksum;
@@ -143,26 +187,26 @@ MenuItem {
                     if (obj.output_dimension && obj.output_dimension.w > 0 && (window.exportSettings.outWidth != obj.output_dimension.w || window.exportSettings.outHeight != obj.output_dimension.h)) {
                         Qt.callLater(window.exportSettings.lensProfileLoaded, obj.output_dimension.w, obj.output_dimension.h);
                     }
-                    if (+obj.frame_readout_time && Math.abs(+obj.frame_readout_time) > 0) {
-                        window.stab.setFrameReadoutTime(obj.frame_readout_time, obj.frame_readout_direction);
+                    if (+lens0.frame_readout_time && Math.abs(+lens0.frame_readout_time) > 0) {
+                        window.stab.setFrameReadoutTime(lens0.frame_readout_time, lens0.frame_readout_direction);
                     }
                     if (+obj.gyro_lpf && Math.abs(+obj.gyro_lpf) > 0) {
                         window.motionData.setGyroLpf(obj.gyro_lpf);
                     }
-                    if (obj.sync_settings && Object.keys(obj.sync_settings).length > 0) {
+                    if (lens0.sync_settings && Object.keys(lens0.sync_settings).length > 0) {
                         window.sync.loadGyroflow({
-                            synchronization: obj.sync_settings
+                            synchronization: lens0.sync_settings
                         });
                     }
 
-                    root.input_horizontal_stretch = obj.input_horizontal_stretch > 0.01? obj.input_horizontal_stretch : 1.0;
-                    root.input_vertical_stretch   = obj.input_vertical_stretch   > 0.01? obj.input_vertical_stretch   : 1.0;
+                    root.input_horizontal_stretch = lens0.input_horizontal_stretch > 0.01? lens0.input_horizontal_stretch : 1.0;
+                    root.input_vertical_stretch   = lens0.input_vertical_stretch   > 0.01? lens0.input_vertical_stretch   : 1.0;
 
-                    root.calibWidth  = obj.calib_dimension.w / root.input_horizontal_stretch;
-                    root.calibHeight = obj.calib_dimension.h / root.input_vertical_stretch;
-                    const coeffs = obj.fisheye_params.distortion_coeffs;
+                    root.calibWidth  = lens0.calib_dimension.w / root.input_horizontal_stretch;
+                    root.calibHeight = lens0.calib_dimension.h / root.input_vertical_stretch;
+                    const coeffs = lens0.fisheye_params.distortion_coeffs;
                     root.distortionCoeffs = coeffs;
-                    const mtrx = obj.fisheye_params.camera_matrix;
+                    const mtrx = lens0.fisheye_params.camera_matrix;
                     k1.setInitialValue(coeffs[0] || 0.0);
                     k2.setInitialValue(coeffs[1] || 0.0);
                     k3.setInitialValue(coeffs[2] || 0.0);
@@ -172,10 +216,36 @@ MenuItem {
                     cx.setInitialValue(mtrx[0][2]);
                     cy.setInitialValue(mtrx[1][2]);
 
+                    const lens2 = (obj.lens && obj.lens.length > 1) ? obj.lens[1] : null;
+                    if (lens2) {
+                        let lens2Info = {
+                            "Lens":       lens2.lens_model,
+                            "Dimensions": lens2.calib_dimension.w + "x" + lens2.calib_dimension.h
+                        };
+                        if (lens2.distortion_model && lens2.distortion_model != "opencv_fisheye") lens2Info["Distortion model"] = lens2.distortion_model;
+                        info2.model = lens2Info;
+
+                        const coeffs2 = lens2.fisheye_params.distortion_coeffs;
+                        const mtrx2 = lens2.fisheye_params.camera_matrix;
+                        k1_2.setInitialValue(coeffs2[0] || 0.0);
+                        k2_2.setInitialValue(coeffs2[1] || 0.0);
+                        k3_2.setInitialValue(coeffs2[2] || 0.0);
+                        k4_2.setInitialValue(coeffs2[3] || 0.0);
+                        fx2.setInitialValue(mtrx2[0][0]);
+                        fy2.setInitialValue(mtrx2[1][1]);
+                        cx2.setInitialValue(mtrx2[0][2]);
+                        cy2.setInitialValue(mtrx2[1][2]);
+
+                        const rot = lens2.rotation_offset || [1.0, 0.0, 0.0, 0.0];
+                        rotationEditor.setInitialValue(rot[0], rot[1], rot[2], rot[3]);
+                    } else {
+                        info2.model = ({});
+                    }
+
                     // Set asymmetrical lens center bias
-                    /*if (obj.asymmetrical) {
-                        console.log(-((mtrx[0][2] / (obj.calib_dimension.w / 2.0)) - 1.0));
-                        console.log(-((mtrx[1][2] / (obj.calib_dimension.h / 2.0)) - 1.0));
+                    /*if (lens0.asymmetrical) {
+                        console.log(-((mtrx[0][2] / (lens0.calib_dimension.w / 2.0)) - 1.0));
+                        console.log(-((mtrx[1][2] / (lens0.calib_dimension.h / 2.0)) - 1.0));
                     }*/
                     // If focal length in pixels is large, it's more likely that Almeida pose estimator will yield better results
                     if (mtrx[0][0] > 10000) {
@@ -232,6 +302,12 @@ MenuItem {
             text: qsTr("Open file");
             iconName: "file-empty"
             onClicked: fileDialog.open2();
+        }
+        Button {
+            text: qsTr("Save");
+            iconName: "save";
+            enabled: controller.lens_loaded;
+            onClicked: saveFileDialog.open2();
         }
         Button {
             text: qsTr("Create new");
@@ -359,23 +435,6 @@ MenuItem {
             }
         }
 
-        component SmallNumberField: NumberField {
-            property bool preventChange2: true;
-            width: parent.width / 2;
-            precision: 12;
-            property string param: "  ";
-            tooltip: param[0] + "<font size=\"1\">" + param[1] + "</font>"
-            font.pixelSize: 11 * dpiScale;
-            onValueChanged: {
-                if (!preventChange2) controller.set_lens_param(param, value);
-            }
-            function setInitialValue(v: real): void {
-                preventChange2 = true;
-                value = v;
-                preventChange2 = false;
-            }
-        }
-
         Label {
             text: qsTr("Pixel focal length");
 
@@ -443,6 +502,201 @@ MenuItem {
                     window.videoArea.videoLoader.text = progress < 1? qsTr("Exporting %1...") : "";
                     window.videoArea.videoLoader.progress = progress < 1? progress : -1;
                     window.videoArea.videoLoader.cancelable = true;
+                }
+            }
+        }
+    }
+
+    // Dual-lens calibration setup. The secondary video *file* (path, browse UI) stays in
+    // VideoInformation.qml - this is only about lens 2's optical calibration, which lives on
+    // profile.lens[1] (see Controller::add_second_lens/load_lens2_profile/set_lens2_param/
+    // set_lens2_rotation_offset).
+    AdvancedSection {
+        btn.text: qsTr("Dual Lens");
+        visible: Object.keys(info.model).length > 0;
+
+        Button {
+            visible: !root.isDualLens;
+            anchors.horizontalCenter: parent.horizontalCenter;
+            text: qsTr("Add second lens");
+            iconName: "plus";
+            onClicked: controller.add_second_lens();
+        }
+
+        Column {
+            visible: root.isDualLens;
+            spacing: 8 * dpiScale;
+            width: parent.width;
+
+            Row {
+                anchors.horizontalCenter: parent.horizontalCenter;
+                spacing: 10 * dpiScale;
+                Button {
+                    text: qsTr("Load lens 2 profile file");
+                    iconName: "file-empty";
+                    onClicked: lens2FileDialog.open2();
+                }
+                Button {
+                    text: qsTr("Remove second lens");
+                    iconName: "bin";
+                    onClicked: messageBox(Modal.Question, qsTr("This will discard lens 2's calibration data. Continue?"), [
+                        { text: qsTr("Yes"), accent: true, clicked: () => controller.remove_second_lens() },
+                        { text: qsTr("No"), clicked: () => {} },
+                    ]);
+                }
+            }
+            FileDialog {
+                id: lens2FileDialog;
+                title: qsTr("Choose a lens profile for the second lens");
+                nameFilters: [qsTr("Lens profiles") + " (*.json" + (Qt.platform.os == "ios"? " *.txt" : "") + ")"];
+                type: "lens";
+                onAccepted: controller.load_lens2_profile(lens2FileDialog.selectedFile.toString());
+            }
+
+            TableList {
+                id: info2;
+                copyable: true;
+                model: ({ })
+            }
+
+            Label {
+                text: qsTr("Pixel focal length");
+                Row {
+                    spacing: 4 * dpiScale;
+                    width: parent.width;
+                    SmallNumberField { id: fx2; param: "fx"; isLens2: true; }
+                    SmallNumberField { id: fy2; param: "fy"; isLens2: true; }
+                }
+            }
+            Label {
+                text: qsTr("Focal center");
+                Row {
+                    spacing: 4 * dpiScale;
+                    width: parent.width;
+                    SmallNumberField { id: cx2; param: "cx"; isLens2: true; }
+                    SmallNumberField { id: cy2; param: "cy"; isLens2: true; }
+                }
+            }
+            Label {
+                text: qsTr("Distortion coefficients");
+                Column {
+                    spacing: 4 * dpiScale;
+                    width: parent.width;
+                    Row {
+                        spacing: 4 * dpiScale;
+                        width: parent.width;
+                        SmallNumberField { id: k1_2; param: "k1"; precision: 16; isLens2: true; }
+                        SmallNumberField { id: k2_2; param: "k2"; precision: 16; isLens2: true; }
+                    }
+                    Row {
+                        spacing: 4 * dpiScale;
+                        width: parent.width;
+                        SmallNumberField { id: k3_2; param: "k3"; precision: 16; isLens2: true; }
+                        SmallNumberField { id: k4_2; param: "k4"; precision: 16; isLens2: true; }
+                    }
+                }
+            }
+
+            Label {
+                text: qsTr("Lens 2 rotation, relative to lens 1 (back-to-back = 180° about Y)");
+
+                Column {
+                    id: rotationEditor;
+                    spacing: 4 * dpiScale;
+                    width: parent.width;
+                    // Guards both directions of the Euler<->quaternion sync below from
+                    // re-triggering each other (and from notifying the controller during
+                    // programmatic initialization via setInitialValue).
+                    property bool preventChange3: true;
+
+                    function setInitialValue(w: real, x: real, y: real, z: real): void {
+                        preventChange3 = true;
+                        quatW.value = w; quatX.value = x; quatY.value = y; quatZ.value = z;
+                        quatToEulerFields();
+                        preventChange3 = false;
+                    }
+                    function quatToEulerFields(): void {
+                        const e = rotationEditor.quatToEuler(quatW.value, quatX.value, quatY.value, quatZ.value);
+                        rotX.value = e.x; rotY.value = e.y; rotZ.value = e.z;
+                    }
+                    function eulerToQuatFields(): void {
+                        const q = rotationEditor.eulerToQuat(rotX.value, rotY.value, rotZ.value);
+                        quatW.value = q.w; quatX.value = q.x; quatY.value = q.y; quatZ.value = q.z;
+                    }
+                    function onEulerEdited(): void {
+                        if (preventChange3) return;
+                        preventChange3 = true;
+                        eulerToQuatFields();
+                        preventChange3 = false;
+                        controller.set_lens2_rotation_offset(quatW.value, quatX.value, quatY.value, quatZ.value);
+                    }
+                    function onQuatEdited(): void {
+                        if (preventChange3) return;
+                        preventChange3 = true;
+                        quatToEulerFields();
+                        preventChange3 = false;
+                        controller.set_lens2_rotation_offset(quatW.value, quatX.value, quatY.value, quatZ.value);
+                    }
+
+                    // Standard ZYX Tait-Bryan (X, Y, Z axis order) <-> quaternion [w,x,y,z].
+                    // Implemented directly rather than via Qt's QML quaternion helpers, whose
+                    // exact availability/behavior isn't something we can verify without a
+                    // build - this is a well-known, independently-verifiable formula, and only
+                    // needs to be internally self-consistent since nothing outside this editor
+                    // interprets the X/Y/Z fields directly (only the resulting quaternion is
+                    // ever sent to the controller).
+                    function eulerToQuat(xDeg: real, yDeg: real, zDeg: real): var {
+                        const rx = xDeg * Math.PI / 180, ry = yDeg * Math.PI / 180, rz = zDeg * Math.PI / 180;
+                        const cx = Math.cos(rx*0.5), sx = Math.sin(rx*0.5);
+                        const cy = Math.cos(ry*0.5), sy = Math.sin(ry*0.5);
+                        const cz = Math.cos(rz*0.5), sz = Math.sin(rz*0.5);
+                        return {
+                            w: cx*cy*cz + sx*sy*sz,
+                            x: sx*cy*cz - cx*sy*sz,
+                            y: cx*sy*cz + sx*cy*sz,
+                            z: cx*cy*sz - sx*sy*cz
+                        };
+                    }
+                    function quatToEuler(w: real, x: real, y: real, z: real): var {
+                        const sinr_cosp = 2*(w*x + y*z);
+                        const cosr_cosp = 1 - 2*(x*x + y*y);
+                        const rx = Math.atan2(sinr_cosp, cosr_cosp);
+                        const sinp = 2*(w*y - z*x);
+                        const ry = Math.abs(sinp) >= 1 ? (Math.sign(sinp) * Math.PI/2) : Math.asin(sinp);
+                        const siny_cosp = 2*(w*z + x*y);
+                        const cosy_cosp = 1 - 2*(y*y + z*z);
+                        const rz = Math.atan2(siny_cosp, cosy_cosp);
+                        return { x: rx*180/Math.PI, y: ry*180/Math.PI, z: rz*180/Math.PI };
+                    }
+
+                    BasicText { text: qsTr("Euler angles (°)"); font.pixelSize: 10 * dpiScale; opacity: 0.7; }
+                    Row {
+                        spacing: 4 * dpiScale;
+                        width: parent.width;
+                        NumberField { id: rotX; width: parent.width / 3; precision: 3; font.pixelSize: 11 * dpiScale; tooltip: "X"; onValueChanged: rotationEditor.onEulerEdited(); }
+                        NumberField { id: rotY; width: parent.width / 3; precision: 3; font.pixelSize: 11 * dpiScale; tooltip: "Y"; onValueChanged: rotationEditor.onEulerEdited(); }
+                        NumberField { id: rotZ; width: parent.width / 3; precision: 3; font.pixelSize: 11 * dpiScale; tooltip: "Z"; onValueChanged: rotationEditor.onEulerEdited(); }
+                    }
+                    BasicText { text: qsTr("Quaternion (w, x, y, z)"); font.pixelSize: 10 * dpiScale; opacity: 0.7; }
+                    Row {
+                        spacing: 4 * dpiScale;
+                        width: parent.width;
+                        NumberField { id: quatW; width: parent.width / 4; precision: 6; font.pixelSize: 11 * dpiScale; tooltip: "w"; onValueChanged: rotationEditor.onQuatEdited(); }
+                        NumberField { id: quatX; width: parent.width / 4; precision: 6; font.pixelSize: 11 * dpiScale; tooltip: "x"; onValueChanged: rotationEditor.onQuatEdited(); }
+                        NumberField { id: quatY; width: parent.width / 4; precision: 6; font.pixelSize: 11 * dpiScale; tooltip: "y"; onValueChanged: rotationEditor.onQuatEdited(); }
+                        NumberField { id: quatZ; width: parent.width / 4; precision: 6; font.pixelSize: 11 * dpiScale; tooltip: "z"; onValueChanged: rotationEditor.onQuatEdited(); }
+                    }
+                    Button {
+                        anchors.horizontalCenter: parent.horizontalCenter;
+                        text: qsTr("Reset to back-to-back (180°)");
+                        onClicked: {
+                            rotationEditor.preventChange3 = true;
+                            quatW.value = 0.0; quatX.value = 0.0; quatY.value = 1.0; quatZ.value = 0.0;
+                            rotationEditor.quatToEulerFields();
+                            rotationEditor.preventChange3 = false;
+                            controller.set_lens2_rotation_offset(0.0, 0.0, 1.0, 0.0);
+                        }
+                    }
                 }
             }
         }

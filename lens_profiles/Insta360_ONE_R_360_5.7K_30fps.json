@@ -1,45 +1,25 @@
 {
     "name": "Insta360 ONE R 360",
-    "identifier": "insta360-oner-ultrawide-2880x2880@29970-no-eis",
-    "compatible_settings": [
-        { "identifier": "insta360-oner-ultrawide-2880x2880@29970-eis" }
-    ],
     "note": "Estimated equidistant-fisheye approximation for 5.7K 30fps mode (2880x2880 per lens). Calibrate with a checkerboard for production accuracy. Both lenses are optically identical; the rear lens file is the _10_ segment counterpart.",
     "calibrated_by": "Estimated",
     "camera_brand": "Insta360",
     "camera_model": "ONE R 360",
-    "lens_model": "360 Mod",
     "camera_setting": "5.7K 30fps",
-    "calib_dimension": { "w": 2880, "h": 2880 },
-    "orig_dimension": { "w": 2880, "h": 2880 },
     "fps": 29.97,
     "imu_orientation": "zXy",
-    "distortion_model": "opencv_fisheye",
-    "fisheye_params": {
-        "RMS_error": 0.0,
-        "camera_matrix": [
-            [917.0, 0.0, 1440.0],
-            [0.0, 917.0, 1440.0],
-            [0.0, 0.0, 1.0]
-        ],
-        "distortion_coeffs": [-0.0001, 0.0, 0.0, 0.0]
-    },
     "calibrator_version": "1.0.0",
     "date": "2026-08-02",
     "official": false,
-    "dual_lens": {
-        "layout": "separate_files",
-        "lens2_profile": {
-            "name": "Insta360 ONE R 360 – Rear Lens",
-            "note": "Same optics as front lens",
-            "calibrated_by": "Estimated",
-            "camera_brand": "Insta360",
-            "camera_model": "ONE R 360",
-            "lens_model": "360 Mod (Rear)",
-            "camera_setting": "5.7K 30fps",
+    "layout": "separate_files",
+    "lens": [
+        {
+            "lens_model": "360 Mod",
+            "identifier": "insta360-oner-ultrawide-2880x2880@29970-no-eis",
+            "compatible_settings": [
+                { "identifier": "insta360-oner-ultrawide-2880x2880@29970-eis" }
+            ],
             "calib_dimension": { "w": 2880, "h": 2880 },
             "orig_dimension": { "w": 2880, "h": 2880 },
-            "fps": 29.97,
             "distortion_model": "opencv_fisheye",
             "fisheye_params": {
                 "RMS_error": 0.0,
@@ -50,9 +30,23 @@
                 ],
                 "distortion_coeffs": [-0.0001, 0.0, 0.0, 0.0]
             },
-            "calibrator_version": "1.0.0",
-            "date": "2026-08-02"
+            "rotation_offset": [1.0, 0.0, 0.0, 0.0]
         },
-        "lens2_rotation_offset": [0.0, 0.0, 0.0]
-    }
+        {
+            "lens_model": "360 Mod (Rear)",
+            "calib_dimension": { "w": 2880, "h": 2880 },
+            "orig_dimension": { "w": 2880, "h": 2880 },
+            "distortion_model": "opencv_fisheye",
+            "fisheye_params": {
+                "RMS_error": 0.0,
+                "camera_matrix": [
+                    [917.0, 0.0, 1440.0],
+                    [0.0, 917.0, 1440.0],
+                    [0.0, 0.0, 1.0]
+                ],
+                "distortion_coeffs": [-0.0001, 0.0, 0.0, 0.0]
+            },
+            "rotation_offset": [0.0, 0.0, 1.0, 0.0]
+        }
+    ]
 }

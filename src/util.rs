@@ -237,13 +237,20 @@ pub fn set_android_context() {
 pub fn init_logging() {
     use simplelog::*;
 
+    // Thread-id logging calls std::thread::current() on every single log line - fine on a
+    // normal thread, but log calls can happen on threads MDK/Qt are mid-teardown on (e.g. the
+    // QSGRenderThread, or an MDK decoder thread exiting), where that thread's own Rust-side
+    // TLS may already be gone, panicking on a thread we don't control the lifecycle of. We
+    // don't use the thread id/name in these logs anyway, so just turn the feature off.
     let log_config = [ "mp4parse", "wgpu", "naga", "akaze", "ureq", "rustls", "mdk" ]
         .into_iter()
         .fold(ConfigBuilder::new(), |mut cfg, x| { cfg.add_filter_ignore_str(x); cfg })
+        .set_thread_level(LevelFilter::Off)
         .build();
     let file_log_config = [ "mp4parse", "wgpu", "naga", "akaze", "ureq", "rustls" ]
         .into_iter()
         .fold(ConfigBuilder::new(), |mut cfg, x| { cfg.add_filter_ignore_str(x); cfg })
+        .set_thread_level(LevelFilter::Off)
         .build();
 
     #[cfg(target_os = "android")]
@@ -265,13 +272,20 @@ pub fn init_logging() {
     qmetaobject::log::init_qt_to_rust();
 
     qml_video_rs::video_item::MDKVideoItem::setLogHandler(|level: i32, text: &str| {
-        match level {
-            1 => { ::log::error!(target: "mdk", "[MDK] {}", text.trim()); },
-            2 => { ::log::warn!(target: "mdk", "[MDK] {}", text.trim()); },
-            3 => { ::log::info!(target: "mdk", "[MDK] {}", text.trim()); },
-            4 => { ::log::debug!(target: "mdk", "[MDK] {}", text.trim()); },
-            _ => { }
-        }
+        // Called directly from C++ (MDK) via an FFI callback, including from MDK's own
+        // thread-exit cleanup - occasionally too late for std::thread::current() to work
+        // (its thread-local state may already be torn down), which would otherwise panic
+        // log_panics's hook into logging that same failure again, causing a hard abort.
+        // Letting a panic unwind across the FFI boundary is UB regardless, so catch it here.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            match level {
+                1 => { ::log::error!(target: "mdk", "[MDK] {}", text.trim()); },
+                2 => { ::log::warn!(target: "mdk", "[MDK] {}", text.trim()); },
+                3 => { ::log::info!(target: "mdk", "[MDK] {}", text.trim()); },
+                4 => { ::log::debug!(target: "mdk", "[MDK] {}", text.trim()); },
+                _ => { }
+            }
+        }));
     });
 }
 
